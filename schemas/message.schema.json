@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JoseRFJuniorLLMs/Micelio/schemas/message.schema.json",
+  "title": "AIP Message Envelope",
+  "description": "Agent Internet Protocol v0.1 message format",
+  "type": "object",
+  "required": ["version", "msg_id", "type", "from", "to", "conversation_id", "timestamp", "ttl", "payload"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "aip/0.1"
+    },
+    "msg_id": {
+      "type": "string",
+      "description": "ULID — 26 chars Crockford base32",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "INTENT", "PROPOSE", "COUNTER", "ACCEPT", "REJECT",
+        "DELIVER", "RECEIPT", "CANCEL",
+        "DISCOVER", "CAPABILITY_ADVERTISE", "CAPABILITY_QUERY",
+        "PING", "PONG", "ERROR"
+      ]
+    },
+    "from": {
+      "type": "string",
+      "description": "DID:key of the sender",
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$"
+    },
+    "to": {
+      "type": "string",
+      "description": "DID:key or peer ID of the receiver"
+    },
+    "conversation_id": {
+      "type": "string",
+      "description": "ULID grouping messages in a negotiation"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ttl": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Time-to-live in seconds"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Type-specific payload"
+    },
+    "signature": {
+      "type": "string",
+      "description": "Base64-encoded Ed25519 signature over canonical message (without signature field)"
+    }
+  }
+}

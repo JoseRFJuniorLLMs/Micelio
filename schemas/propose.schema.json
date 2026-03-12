@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JoseRFJuniorLLMs/Micelio/schemas/propose.schema.json",
+  "title": "AIP PROPOSE Payload",
+  "description": "Payload for PROPOSE messages — offering to fulfill an INTENT",
+  "type": "object",
+  "required": ["capability", "approach"],
+  "properties": {
+    "capability": {
+      "type": "string"
+    },
+    "approach": {
+      "type": "string",
+      "description": "How the agent plans to fulfill the intent"
+    },
+    "cost": {
+      "type": "object",
+      "properties": {
+        "amount": { "type": "number", "minimum": 0 },
+        "currency": { "type": "string" }
+      }
+    },
+    "eta": {
+      "type": "string",
+      "description": "Estimated time to complete (ISO 8601 duration)"
+    },
+    "conditions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Conditions that must be met"
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JoseRFJuniorLLMs/Micelio/schemas/capability.schema.json",
+  "title": "AIP Capability Advertisement",
+  "description": "Schema for CAPABILITY_ADVERTISE payloads",
+  "type": "object",
+  "required": ["name", "version", "description"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Namespaced capability name (e.g., 'nlp.translate', 'code.review')",
+      "pattern": "^[a-z][a-z0-9]*\\.[a-z][a-z0-9_]*$"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "description": {
+      "type": "string"
+    },
+    "input_schema": {
+      "type": "object",
+      "description": "JSON Schema for capability input"
+    },
+    "output_schema": {
+      "type": "object",
+      "description": "JSON Schema for capability output"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
