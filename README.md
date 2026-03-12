@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/micelio.mp4" width="100%" />
+  <img src="media/micelio.gif" width="100%" alt="Micélio Demo" />
 </p>
 
 <h1 align="center">🍄 Micélio</h1>
