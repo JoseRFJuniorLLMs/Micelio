@@ -15,12 +15,13 @@
   <a href="#the-protocol">The Protocol</a> &bull;
   <a href="#security">Security</a> &bull;
   <a href="#api-reference">API Reference</a> &bull;
-  <a href="#demo">Demo</a> &bull;
+  <a href="#python-sdk">Python SDK</a> &bull;
   <a href="#roadmap">Roadmap</a>
 </p>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white" />
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green" />
   <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/JoseRFJuniorLLMs/Micelio/ci.yml?label=CI" />
 </p>
@@ -45,10 +46,12 @@ When two AI agents need to communicate today, the options are:
 **AIP is to agents what HTTP was to documents.**
 
 A minimal, universal protocol where agents:
-1. **Discover** each other (mDNS / Kademlia DHT)
+1. **Discover** each other (mDNS local + Kademlia DHT global + GossipSub broadcast)
 2. **Identify** themselves (DID:key from Ed25519 — no CA, no blockchain)
 3. **Negotiate** tasks (INTENT -> PROPOSE -> ACCEPT -> DELIVER -> RECEIPT)
 4. **Verify** every message (Ed25519 signatures with replay protection)
+5. **Trust** each other (local-first reputation with weighted temporal decay)
+6. **Remember** interactions (NietzscheDB hyperbolic episodic memory)
 
 No servers. No API keys. No central authority. No tokens. No blockchain.
 
@@ -58,7 +61,8 @@ No servers. No API keys. No central authority. No tokens. No blockchain.
 
 ### Prerequisites
 
-- **Go 1.22+**
+- **Go 1.22+** (Go SDK)
+- **Python 3.9+** (Python SDK, optional)
 
 ### Installation
 
@@ -133,13 +137,7 @@ go run ./cmd/micelio/ keygen --output my-agent.enc.json --encrypt
 go run ./cmd/micelio/ agent --port 9000 --identity my-agent.json
 ```
 
-The agent starts listening for peers via mDNS and is ready to receive AIP messages.
-
-### Show Identity Info
-
-```bash
-go run ./cmd/micelio/ info --identity my-agent.json
-```
+The agent starts listening for peers via mDNS + DHT and is ready to receive AIP messages.
 
 ---
 
@@ -154,11 +152,12 @@ go run ./cmd/micelio/ info --identity my-agent.json
 +------+----------------------------------------------------------+
 |  L6  |  Cognition Layer                                         |
 |      |  NietzscheDB (hyperbolic memory, trust, desires)         |
+|      |  Cognition Engine (desire -> INTENT autonomous loop)     |
 +------+----------------------------------------------------------+
 |  L5  |  AIP Protocol  <-- THIS PROJECT                          |
 |      |  - Intent Protocol (negotiation state machine)           |
-|      |  - Capability Discovery & Advertisement                  |
-|      |  - Reputation Signaling (local-first trust scores)       |
+|      |  - Capability Discovery (DHT + GossipSub)                |
+|      |  - Reputation Layer (local-first trust scores)           |
 +------+----------------------------------------------------------+
 |  L3  |  AIP Message Format                                      |
 |      |  ULID IDs, Ed25519 signatures, TTL, replay protection,   |
@@ -171,7 +170,8 @@ go run ./cmd/micelio/ info --identity my-agent.json
 |      |  DID:key from Ed25519, AES-256-GCM key encryption        |
 +------+----------------------------------------------------------+
 |  L0  |  Transport Layer                                         |
-|      |  libp2p - TCP, QUIC, TLS + Noise encryption,             |
+|      |  libp2p - TCP, QUIC, WebTransport, TLS + Noise,          |
+|      |  NAT traversal (UPnP, relay, hole punching),             |
 |      |  connection manager, rate limiting                        |
 +------+----------------------------------------------------------+
 ```
@@ -180,10 +180,11 @@ go run ./cmd/micelio/ info --identity my-agent.json
 
 | Human Internet | Agent Internet (AIP) |
 |---|---|
-| TCP/IP | libp2p (TCP, QUIC, TLS, Noise) |
-| DNS | Kademlia DHT + mDNS |
+| TCP/IP | libp2p (TCP, QUIC, WebTransport, Noise) |
+| DNS | Kademlia DHT + mDNS + GossipSub |
 | HTTP | **AIP** |
 | SSL Certificates | DID:key (Ed25519) |
+| Web of Trust | Reputation Layer (temporal decay) |
 | Web Apps | Autonomous Agents |
 
 ### Why AIP Only Lives at L5
@@ -271,8 +272,6 @@ This separation is what killed competing projects and what makes AIP viable.
 
 ### AIP Message Envelope
 
-Every message follows the same envelope (JSON, MessagePack, or CBOR):
-
 ```json
 {
   "version": "aip/0.1",
@@ -287,14 +286,6 @@ Every message follows the same envelope (JSON, MessagePack, or CBOR):
   "signature": "base64-encoded-ed25519-signature-over-canonical-message"
 }
 ```
-
-**Key design choices:**
-- **ULID** for `msg_id` — lexicographically sortable by time, 128-bit entropy
-- **DID:key** for `from`/`to` — self-sovereign identity, no registry
-- **Ed25519 signature** — covers the entire message (without signature field)
-- **TTL** — messages expire, preventing replay attacks
-- **conversation_id** — groups all messages in a single negotiation
-- **Message deduplication** — seen msg_id cache prevents replays
 
 ---
 
@@ -316,31 +307,18 @@ Every message follows the same envelope (JSON, MessagePack, or CBOR):
 |---|---|---|
 | Replay attacks | TTL expiration + message dedup (msg_id cache, 5min window) | Implemented |
 | Message tampering | Ed25519 signature over canonical message | Implemented |
-| Signature bypass | Mandatory signature verification on receive | Implemented |
+| Signature bypass | Mandatory verification on receive + reputation ban | Implemented |
 | Identity spoofing | DID:key derived from public key — unforgeable | Implemented |
 | Man-in-the-middle | TLS + Noise protocol at transport layer | Implemented |
 | Key theft | AES-256-GCM encrypted key files with passphrase | Implemented |
 | Spam / DoS | Per-peer rate limiter (100 msg/s default) | Implemented |
-| Peer flooding | Connection manager (50-200 peers) + max 200 discovered | Implemented |
-| Reconnect storms | Exponential backoff on failed connections (2^n sec, max 5min) | Implemented |
+| Peer flooding | Connection manager (50-200) + max 200 discovered | Implemented |
+| Reconnect storms | Exponential backoff (2^n sec, max 5min) | Implemented |
 | Handler crashes | Panic recovery in message handlers | Implemented |
 | Counter loop | Max counter rounds per conversation (default: 10) | Implemented |
 | Stale conversations | Configurable timeout with auto-expiry | Implemented |
-| Sybil attacks | Future: local-first trust graph per agent | Planned |
-
-### Identity Key Encryption
-
-Agent keys can be encrypted at rest using AES-256-GCM with PBKDF2 key derivation:
-
-```go
-// Save encrypted
-id.SaveEncrypted("agent.enc.json", "my-passphrase")
-
-// Load encrypted
-id, _ := identity.LoadEncrypted("agent.enc.json", "my-passphrase")
-```
-
-The encrypted file contains the AES-256-GCM ciphertext, PBKDF2 salt, and GCM nonce — the passphrase never touches disk.
+| Sybil attacks | Local-first reputation with temporal decay | Implemented |
+| NAT barriers | UPnP port mapping + relay + hole punching | Implemented |
 
 ---
 
@@ -357,12 +335,10 @@ fmt.Println(id.DID) // did:key:z6Mk...
 sig, _ := id.Sign([]byte("hello"))
 ok, _ := id.Verify([]byte("hello"), sig) // true
 
-// Persist and load (plaintext)
+// Persist and load (plaintext or encrypted)
 id.Save("agent.json")
-id2, _ := identity.Load("agent.json")
-
-// Persist and load (encrypted)
 id.SaveEncrypted("agent.enc.json", "passphrase")
+id2, _ := identity.Load("agent.json")
 id3, _ := identity.LoadEncrypted("agent.enc.json", "passphrase")
 
 // Verify from DID string (no private key needed)
@@ -372,10 +348,12 @@ ok, _ = identity.VerifyFrom(id.DID, data, sig)
 ### Agent (`pkg/agent`)
 
 ```go
-// Create an agent
+// Create an agent with reputation + optional NietzscheDB cognition
 agent, _ := agent.New(ctx, agent.Config{
-    Name: "MyAgent",
-    Port: 9000,
+    Name:           "MyAgent",
+    Port:           9000,
+    NietzscheAddr:  "localhost:50051", // optional: enables L6 cognition
+    ReputationFile: "rep.json",        // optional: persists trust scores
 })
 
 // Register capabilities
@@ -385,106 +363,137 @@ agent.RegisterCapability(agent.Capability{
     Version:     "1.0.0",
 })
 
-// Handle incoming messages (with automatic signature verification + dedup)
+// Handle incoming messages (auto signature verification + dedup + reputation)
 agent.OnMessage(protocol.TypeIntent, func(from peer.ID, msg *protocol.Message) *protocol.Message {
     reply, _ := protocol.NewMessage(protocol.TypePropose, agent.DID(), msg.From, msg.ConversationID, propose)
     return reply
 })
 
-// Initiate a negotiation
-conv, _ := agent.SendIntent(ctx, targetPeerID, protocol.IntentPayload{
+// Smart negotiation: auto-select trusted peer from NietzscheDB
+conv, targetPeer, _ := agent.SendIntentSmart(ctx, protocol.IntentPayload{
     Capability:  "nlp.translate",
     Description: "Translate this text",
 })
-
-// Send follow-up messages
-agent.SendPropose(ctx, target, convID, proposePayload)
-agent.SendAccept(ctx, target, convID)
-agent.SendDeliver(ctx, target, convID, deliverPayload)
-agent.SendReceipt(ctx, target, convID, receiptPayload)
 ```
 
-### Protocol (`pkg/protocol`)
+### Network (`pkg/network`) — DHT + NAT + WebTransport
 
 ```go
-// Create messages with auto-generated ULID and timestamp
-msg, _ := protocol.NewMessage(
-    protocol.TypeIntent,
-    "did:key:z6Mk...", // from
-    "did:key:z6Mk...", // to
-    convID,
-    intentPayload,
-)
-
-// TTL validation and expiry
-err := msg.ValidateTTL()   // checks age + clock skew
-expired := msg.IsExpired() // simple bool check
-
-// Serialize / deserialize
-bytes, _ := msg.Encode()
-msg2, _ := protocol.DecodeMessage(bytes)
-
-// Conversation tracking with FSM + timeouts
-store := protocol.NewConversationStore()
-conv := store.Create(convID, initiatorDID)
-conv.Transition(intentMsg)  // created -> created (INTENT sent)
-conv.Transition(proposeMsg) // created -> proposed
-conv.Transition(acceptMsg)  // proposed -> accepted
-
-// Message deduplication
-store.HasSeen(msgID)   // check if already processed
-store.MarkSeen(msgID)  // mark as seen
-store.CleanupSeen()    // remove entries older than 5 min
-
-// Conversation timeout management
-timedOut := store.TimeoutConversations() // auto-expire stale conversations
-```
-
-### Network (`pkg/network`)
-
-```go
-// Create a libp2p host with TLS + Noise, connection manager, rate limiter
+// Create host with DHT, WebTransport, and NAT traversal
 host, _ := network.New(ctx, network.Config{
-    ListenPort: 9000,
-    PrivKey:    identity.PrivKey,
+    ListenPort:        9000,
+    PrivKey:           identity.PrivKey,
+    EnableDHT:         true,  // Kademlia DHT for global discovery
+    EnableWebTransport: true, // QUIC + WebTransport for browser agents
+    EnableNATTraversal: true, // UPnP + relay + hole punching
 })
 
-// Enable mDNS peer discovery (bounded, with exponential backoff)
-host.StartDiscovery()
+// Start all discovery methods
+host.StartDiscovery()        // mDNS (local)
+host.StartDHTDiscovery()     // Kademlia DHT (global) + GossipSub
 
-// Register AIP protocol handler (rate-limited, with read deadlines)
-host.SetStreamHandler(func(peerID peer.ID, msg *protocol.Message) {
-    // Handle incoming AIP messages
-})
+// Advertise capabilities via DHT + GossipSub
+host.AdvertiseCapability(ctx, "nlp.translate")
 
-// Send directly to a peer (length-prefixed binary framing)
-host.SendDirect(ctx, targetPeerID, msg)
+// Find peers with a capability via DHT
+peers, _ := host.FindCapabilityProviders(ctx, "nlp.translate", 10)
+```
 
-// Join GossipSub topics for broadcast
-topic, _ := host.JoinTopic("aip-capabilities")
+### Reputation (`pkg/reputation`) — Standalone Trust Layer
+
+```go
+// Create trust store (no database needed)
+store := reputation.NewTrustStore()
+
+// Record interactions
+store.RecordSuccess("did:key:z6Mk...", 150.0) // peer delivered in 150ms
+store.RecordFailure("did:key:z6Mk...")         // peer failed
+store.RecordSignatureFailure("did:key:z6Mk...") // immediate ban (score=0)
+
+// Query trust
+score := store.GetScore("did:key:z6Mk...")     // 0.0-1.0, 0.5 for unknown
+trusted := store.GetTrustedPeers(0.6)          // peers with score >= 0.6
+banned := store.IsBlocked("did:key:z6Mk...")
+
+// Peer selection (trust-weighted)
+selector := reputation.NewPeerSelector(store)
+best := selector.SelectBest(candidates, 0.3)           // sorted by trust
+chosen, _ := selector.WeightedRandom(candidates, 0.3)  // probabilistic
+
+// Persistence
+store.Save("reputation.json")
+loaded, _ := reputation.Load("reputation.json")
 ```
 
 ### Cognition (`pkg/cognition`) — L6 NietzscheDB Integration
 
 ```go
-// Create a cognitive store backed by NietzscheDB
-store, _ := cognition.NewStore(ctx, "localhost:50051", "agent-brain")
+// Create cognitive store backed by NietzscheDB (Poincare ball)
+store, _ := cognition.NewStore(ctx, cognition.Config{
+    NietzscheAddr: "localhost:50051",
+    AgentDID:      "did:key:z6Mk...",
+})
 
-// Trust management (Poincare ball — deeper = more trusted)
-trust, _ := cognition.NewTrustManager(store)
-trust.RecordInteraction(peerDID, outcome, rating)
-score := trust.GetTrustScore(peerDID)
+// Trust management (magnitude = depth in Poincare ball)
+store.RecordInteraction(ctx, peerDID, true, 150.0)
+score := store.GetTrustScore(ctx, peerDID)
+trusted, _ := store.GetTrustedPeers(ctx, 0.6, 10)
 
-// Capability cache
-capCache, _ := cognition.NewCapabilityCache(store)
-capCache.Store(peerDID, capabilities)
-peers := capCache.FindProviders("nlp.translate")
+// Episodic memory (negotiation history)
+store.RecordNegotiation(ctx, memory)
+history, _ := store.GetNegotiationHistory(ctx, peerDID, 10)
 
-// Episodic memory
-memory, _ := cognition.NewMemory(store)
-memory.Remember(conversationID, summary, outcome)
-relevant := memory.Recall("translation tasks", 5) // top-5 KNN
+// Capability cache (avoid redundant DHT lookups)
+store.CacheCapability(ctx, cap)
+providers, _ := store.FindPeersWithCapability(ctx, "nlp.translate", 0.3, 5)
+
+// Desire engine (knowledge gaps -> AIP INTENTs)
+engine := cognition.NewCognitionEngine(store)
+engine.Start() // polls desires every 30s, purges expired caps every 60s
+for desire := range engine.Desires() {
+    // Convert desire to AIP INTENT and send to network
+}
 ```
+
+---
+
+## Python SDK
+
+A Python SDK is available in `sdks/python/` for building Python-based AIP agents:
+
+```bash
+cd sdks/python
+pip install -e .
+```
+
+```python
+from micelio import Identity, Message, MessageType, Conversation, MicelioClient
+
+# Generate identity (wire-compatible with Go agents)
+identity = Identity.generate()
+print(identity.did)  # did:key:z6Mk...
+
+# Sign and verify
+sig = identity.sign(b"hello")
+assert identity.verify(b"hello", sig)
+
+# Create AIP messages
+msg = Message.new(
+    msg_type=MessageType.INTENT,
+    from_did=identity.did,
+    to_did="did:key:z6Mk...",
+    conversation_id=Conversation.new_id(),
+    payload={"capability": "nlp.translate", "description": "Translate text"},
+)
+
+# Connect to a Go agent
+client = MicelioClient()
+client.connect("localhost", 9000)
+client.send_message(msg)
+response = client.receive_message()
+```
+
+The Python SDK implements the full AIP protocol: identity (DID:key), message envelope, negotiation FSM, TCP client, and mDNS discovery.
 
 ---
 
@@ -492,60 +501,53 @@ relevant := memory.Recall("translation tasks", 5) // top-5 KNN
 
 ```
 Micelio/
-+-- cmd/
-|   +-- micelio/
-|       +-- main.go                 # CLI: keygen, agent, info
++-- cmd/micelio/main.go                  # CLI: keygen, agent, info
 +-- pkg/
 |   +-- identity/
-|   |   +-- did.go                  # L1: DID:key, Ed25519, sign/verify, AES-256-GCM encryption
-|   |   +-- did_test.go             # Identity tests (keygen, sign, verify, encrypt/decrypt)
+|   |   +-- did.go                       # L1: DID:key, Ed25519, AES-256-GCM encryption
+|   |   +-- did_test.go                  # Identity tests
 |   +-- protocol/
-|   |   +-- types.go                # Message types, states, constants
-|   |   +-- message.go              # AIP envelope, payloads, ULID, TTL validation, dedup
-|   |   +-- negotiation.go          # FSM, conversation tracking, timeouts, dedup store
-|   |   +-- protocol_test.go        # Protocol tests (FSM, transitions, TTL, payloads)
+|   |   +-- types.go                     # Message types, states, constants
+|   |   +-- message.go                   # AIP envelope, payloads, ULID, TTL
+|   |   +-- negotiation.go              # FSM, conversation tracking, timeouts
+|   |   +-- protocol_test.go            # Protocol tests
 |   +-- network/
-|   |   +-- host.go                 # libp2p host, GossipSub, TLS+Noise, connection manager
-|   |   +-- discovery.go            # mDNS discovery, bounded peers, exponential backoff
-|   |   +-- handler.go              # Stream handler, rate limiting, read deadlines
-|   |   +-- ratelimit.go            # Per-peer rate limiter (sliding window)
+|   |   +-- host.go                      # libp2p host, TLS+Noise, connmgr, NAT, WebTransport
+|   |   +-- dht.go                       # Kademlia DHT discovery + capability provider records
+|   |   +-- gossip.go                    # GossipSub capability broadcast
+|   |   +-- discovery.go                 # mDNS discovery, bounded peers, backoff
+|   |   +-- handler.go                   # Stream handler, rate limiting, read deadlines
+|   |   +-- ratelimit.go                 # Per-peer rate limiter
 |   +-- agent/
-|   |   +-- agent.go                # Agent abstraction, signature verification, panic recovery
-|   |   +-- agent_test.go           # Agent tests (capabilities, handlers, lifecycle)
+|   |   +-- agent.go                     # Agent abstraction, sig verification, reputation
+|   |   +-- agent_test.go               # Agent tests
+|   +-- reputation/
+|   |   +-- trust.go                     # Standalone trust scoring (no DB needed)
+|   |   +-- persistence.go              # JSON file persistence
+|   |   +-- selector.go                 # Trust-weighted peer selection
+|   |   +-- reputation_test.go          # Reputation tests
 |   +-- cognition/
-|   |   +-- store.go                # NietzscheDB connection (L6)
-|   |   +-- trust.go                # Trust scoring (Poincare ball depth)
-|   |   +-- memory.go               # Episodic memory (KNN recall)
-|   |   +-- capability.go           # Capability cache
-|   |   +-- desire.go               # Desire generation
+|   |   +-- store.go                     # NietzscheDB connection (L6)
+|   |   +-- trust.go                     # Trust scoring (Poincare ball depth)
+|   |   +-- memory.go                    # Episodic memory (negotiation history)
+|   |   +-- capability.go               # Capability cache with TTL
+|   |   +-- desire.go                    # Desire generation (knowledge gaps)
+|   |   +-- engine.go                    # Cognition engine (desire -> INTENT loop)
 |   +-- logging/
-|       +-- logger.go               # Structured logger (DEBUG/INFO/WARN/ERROR)
-+-- schemas/
-|   +-- message.schema.json         # AIP envelope JSON Schema
-|   +-- intent.schema.json          # INTENT payload schema
-|   +-- propose.schema.json         # PROPOSE payload schema
-|   +-- capability.schema.json      # CAPABILITY_ADVERTISE schema
-+-- examples/
-|   +-- two_agents/
-|       +-- main.go                 # Two-agent P2P demo
-+-- .github/
-|   +-- workflows/
-|       +-- ci.yml                  # GitHub Actions CI (test + build + lint)
-+-- media/
-|   +-- micelio.mp4                 # Demo video
-+-- AIP_Especificacao_Tecnica_v0.2-Micelio.docx
-+-- Agent_Internet_Stack_v1.0-Micelio.docx
-+-- Makefile                        # build, test, lint, fmt, vet, clean
-+-- Dockerfile                      # Multi-stage Alpine build
-+-- LICENSE                         # MIT
-+-- CONTRIBUTING.md                 # Contribution guidelines
-+-- SECURITY.md                     # Security policy & vulnerability reporting
-+-- go.mod
-+-- go.sum
-+-- README.md
+|       +-- logger.go                    # Structured logger (DEBUG/INFO/WARN/ERROR)
++-- sdks/python/                         # Python SDK
+|   +-- micelio/                         # identity, protocol, negotiation, client, discovery
+|   +-- tests/                           # Python test suite
+|   +-- examples/basic_agent.py          # Python agent example
++-- schemas/                             # JSON Schemas for all message types
++-- examples/two_agents/main.go          # Two-agent P2P demo
++-- .github/workflows/ci.yml             # GitHub Actions CI
++-- Makefile                             # build, test, lint, fmt, vet, clean
++-- Dockerfile                           # Multi-stage Alpine build
++-- LICENSE | CONTRIBUTING.md | SECURITY.md
 ```
 
-**Total: ~4,000 lines of Go** — minimal, no bloat, every line has a purpose.
+**Total: ~5,500 lines of Go + ~2,000 lines of Python**
 
 ---
 
@@ -557,10 +559,11 @@ Micelio/
 - Transport-agnostic (TCP, QUIC, WebTransport)
 - Built-in encryption (TLS 1.3 + Noise protocol)
 - mDNS for local discovery, Kademlia DHT for global
+- NAT traversal (UPnP, relay, hole punching)
 - Connection manager for bounded resource usage
 - GossipSub for pub/sub broadcast
 
-### Why DID:key (not API keys, not OAuth, not blockchain)?
+### Why DID:key?
 
 ```
 Ed25519 Keypair -> Multicodec prefix (0xed01) -> Base58btc -> did:key:z...
@@ -572,28 +575,6 @@ Ed25519 Keypair -> Multicodec prefix (0xed01) -> Base58btc -> did:key:z...
 - **Interoperable**: W3C DID standard
 - **Encryptable**: AES-256-GCM at-rest protection with PBKDF2
 
-### Why ULID (not UUID)?
-
-```
-01ARZ3NDEKTSV4RRFFQ69G5FAV
-|----------|------------|
- timestamp    random
- (48-bit)   (80-bit)
-```
-
-- Lexicographically sortable by creation time
-- Efficient range queries in databases (NietzscheDB, etc.)
-- Same collision resistance as UUIDv4 (128 bits)
-- 26 characters, Crockford Base32
-
-### Why JSON Schema for Capabilities?
-
-Capabilities are advertised with machine-readable schemas. Before negotiation starts, agents can validate:
-- "Can I provide the inputs this capability needs?"
-- "Will the output format work for my use case?"
-
-This creates **verifiable contracts** before any work begins.
-
 ### Wire Format
 
 Messages are transmitted as **length-prefixed binary frames**:
@@ -602,7 +583,7 @@ Messages are transmitted as **length-prefixed binary frames**:
 [4 bytes: payload length (big-endian uint32)] [N bytes: JSON payload]
 ```
 
-Max message size: 1 MB. This is intentionally simple — no HTTP overhead, no content negotiation, just raw protocol.
+Max message size: 1 MB. Same framing in Go and Python SDKs.
 
 ---
 
@@ -611,16 +592,22 @@ Max message size: 1 MB. This is intentionally simple — no HTTP overhead, no co
 | Feature | AIP (Micelio) | MCP (Anthropic) | Fetch.ai | AutoGPT | LangChain |
 |---|---|---|---|---|---|
 | P2P | libp2p | Client-Server | + blockchain | No | No |
-| Negotiation | FSM (8 states) | No | Partial | No | No |
+| Negotiation | FSM (9 states) | No | Partial | No | No |
 | Identity | DID:key | API keys | Token-based | No | No |
-| Discovery | mDNS + DHT | No | Yes | No | No |
+| Global Discovery | Kademlia DHT | No | Yes | No | No |
+| Local Discovery | mDNS | No | No | No | No |
+| Capability Broadcast | GossipSub | No | Partial | No | No |
 | Signatures | Ed25519 + verify | No | Yes | No | No |
 | Key Encryption | AES-256-GCM | No | No | No | No |
+| Reputation | Trust + decay | No | Partial | No | No |
 | Rate Limiting | Per-peer | No | No | No | No |
 | Replay Protection | TTL + dedup | No | Partial | No | No |
+| NAT Traversal | UPnP + relay + DCUtR | No | Yes | No | No |
+| WebTransport | QUIC + WT | No | No | No | No |
+| Graph Memory | NietzscheDB | No | No | No | No |
+| Python SDK | Yes | Yes | Yes | No | Yes |
 | Blockchain required | No | No | Yes | No | No |
 | Token required | No | No | Yes | No | No |
-| Language agnostic | JSON Schema | Partial | No | No | Python |
 | Spec-first | Yes | Yes | No | No | No |
 
 ---
@@ -632,12 +619,15 @@ Max message size: 1 MB. This is intentionally simple — no HTTP overhead, no co
 - [x] **Phase 2** — Messaging Layer (envelope, signatures, TTL, ULID, dedup)
 - [x] **Phase 3** — Intent Protocol (negotiation FSM, conversation tracking, timeouts)
 - [x] **Phase 3.5** — Security Hardening (signature verification, rate limiting, key encryption, connection management, backoff, panic recovery)
-- [ ] **Phase 4** — Capability Discovery (DHT provider records, gossip broadcast)
-- [ ] **Phase 5** — Reputation Layer (local-first trust scores, weighted decay)
-- [ ] **Phase 6** — SDKs (JavaScript/TypeScript, Python, Rust)
-- [ ] **Phase 7** — WebTransport (browser-native agents)
-- [ ] **Phase 8** — NietzscheDB Integration (L6 cognition layer — trust, memory, desires)
-- [ ] **Phase 9** — NAT Traversal (relay, hole punching for internet-wide agents)
+- [x] **Phase 4** — Capability Discovery (Kademlia DHT provider records + GossipSub broadcast)
+- [x] **Phase 5** — Reputation Layer (standalone trust scores, weighted temporal decay, peer selection)
+- [x] **Phase 6** — Python SDK (identity, protocol, FSM, TCP client, mDNS discovery)
+- [x] **Phase 7** — WebTransport + QUIC (browser-native agents via libp2p)
+- [x] **Phase 8** — NietzscheDB Cognition (trust, episodic memory, capability cache, desire engine)
+- [x] **Phase 9** — NAT Traversal (UPnP port mapping, circuit relay, hole punching via DCUtR)
+- [ ] **Phase 10** — JavaScript/TypeScript SDK
+- [ ] **Phase 11** — Rust SDK
+- [ ] **Phase 12** — Formal RFC specification
 
 ---
 
@@ -646,6 +636,7 @@ Max message size: 1 MB. This is intentionally simple — no HTTP overhead, no co
 ### Prerequisites
 
 - Go 1.22+
+- Python 3.9+ (for Python SDK)
 - (Optional) `golangci-lint` for linting
 
 ### Commands
@@ -664,28 +655,43 @@ make all          # fmt + vet + test + build
 ### Running Tests
 
 ```bash
+# Go
 go test -race -v ./...
+
+# Python
+cd sdks/python && pip install -e ".[dev]" && pytest tests/ -v
 ```
 
 Tests cover:
 - **Identity**: key generation, DID encoding/decoding, signing/verification, encrypted save/load
 - **Protocol**: message creation, FSM transitions, invalid transitions, TTL validation, payload types
 - **Agent**: capability registration, message handler wiring, lifecycle management
+- **Reputation**: trust scoring, temporal decay, signature ban, persistence, peer selection
 
 ---
 
 ## Dependencies
 
+### Go
+
 | Package | Purpose |
 |---|---|
-| `github.com/libp2p/go-libp2p` | P2P networking, TLS + Noise encryption |
+| `github.com/libp2p/go-libp2p` | P2P networking, TLS + Noise, QUIC, WebTransport |
+| `github.com/libp2p/go-libp2p-kad-dht` | Kademlia DHT for global discovery |
 | `github.com/libp2p/go-libp2p-pubsub` | GossipSub broadcast |
-| `github.com/libp2p/go-libp2p/p2p/net/connmgr` | Connection management (50-200 peers) |
 | `github.com/multiformats/go-multiaddr` | Network address abstraction |
 | `github.com/oklog/ulid/v2` | Time-sortable unique IDs |
 | `golang.org/x/crypto/pbkdf2` | Key derivation for encrypted identity |
 
-Zero external dependencies beyond libp2p ecosystem + Go stdlib extensions. No frameworks. No ORMs. No magic.
+### Python
+
+| Package | Purpose |
+|---|---|
+| `cryptography` | Ed25519 signing, key management |
+| `python-ulid` | ULID generation |
+| `zeroconf` (optional) | mDNS discovery |
+
+Zero external dependencies beyond libp2p ecosystem. No frameworks. No ORMs. No magic.
 
 ---
 
@@ -693,10 +699,11 @@ Zero external dependencies beyond libp2p ecosystem + Go stdlib extensions. No fr
 
 | Document | Description |
 |---|---|
-| `AIP_Especificacao_Tecnica_v0.2-Micelio.docx` | Full AIP specification — all layers, algorithms, schemas |
-| `Agent_Internet_Stack_v1.0-Micelio.docx` | Agent Internet Stack design — 8-layer architecture rationale |
+| `AIP_Especificacao_Tecnica_v0.2-Micelio.docx` | Full AIP specification |
+| `Agent_Internet_Stack_v1.0-Micelio.docx` | 8-layer architecture rationale |
 | `schemas/` | Machine-readable JSON Schemas for all message types |
-| `CONTRIBUTING.md` | How to contribute to Micelio |
+| `sdks/python/README.md` | Python SDK documentation |
+| `CONTRIBUTING.md` | How to contribute |
 | `SECURITY.md` | Security policy and vulnerability reporting |
 
 ---
