@@ -177,3 +177,38 @@ func TestAgentOnMessage(t *testing.T) {
 		return nil
 	})
 }
+
+func TestConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{name: "valid minimal", cfg: Config{Name: "a", Port: 0}, wantErr: false},
+		{name: "valid with NietzscheAddr", cfg: Config{Name: "a", Port: 9000, NietzscheAddr: "localhost:50051"}, wantErr: false},
+		{name: "empty name", cfg: Config{Name: "", Port: 0}, wantErr: true},
+		{name: "whitespace name", cfg: Config{Name: "   ", Port: 0}, wantErr: true},
+		{name: "negative port", cfg: Config{Name: "a", Port: -1}, wantErr: true},
+		{name: "port too high", cfg: Config{Name: "a", Port: 70000}, wantErr: true},
+		{name: "bad NietzscheAddr no port", cfg: Config{Name: "a", Port: 0, NietzscheAddr: "localhost"}, wantErr: true},
+		{name: "bad NietzscheAddr empty host", cfg: Config{Name: "a", Port: 0, NietzscheAddr: ":50051"}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewRejectsInvalidConfig(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := New(ctx, Config{Name: "", Port: 0})
+	if err == nil {
+		t.Error("New() should reject config with empty Name")
+	}
+}

@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +50,8 @@ type Agent struct {
 	reputationFile string           // path to persist reputation JSON (empty = in-memory only)
 	mu             sync.RWMutex
 	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 // Config holds agent configuration.
@@ -73,9 +77,39 @@ type Config struct {
 	Capabilities []string
 }
 
+// Validate checks the agent Config for invalid or missing values.
+// Port 0 is allowed (random port assignment). If NietzscheAddr is set, it must
+// be a valid host:port address.
+func (c Config) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return fmt.Errorf("agent config: Name must not be empty")
+	}
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("agent config: Port must be 0-65535, got %d", c.Port)
+	}
+	if c.NietzscheAddr != "" {
+		host, port, err := net.SplitHostPort(c.NietzscheAddr)
+		if err != nil {
+			return fmt.Errorf("agent config: NietzscheAddr %q is not valid host:port: %w", c.NietzscheAddr, err)
+		}
+		if strings.TrimSpace(host) == "" {
+			return fmt.Errorf("agent config: NietzscheAddr host must not be empty")
+		}
+		if strings.TrimSpace(port) == "" {
+			return fmt.Errorf("agent config: NietzscheAddr port must not be empty")
+		}
+	}
+	return nil
+}
+
 // New creates and starts a new AIP agent.
 func New(ctx context.Context, cfg Config) (*Agent, error) {
 	log := logging.New("agent")
+
+	// Validate configuration before proceeding.
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 
 	if cfg.Identity == nil {
 		id, err := identity.Generate()
@@ -109,6 +143,10 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		rep = reputation.NewTrustStore()
 	}
 
+	// Create a cancellable context owned by the agent so Close() can
+	// signal all background goroutines to stop.
+	agentCtx, agentCancel := context.WithCancel(ctx)
+
 	a := &Agent{
 		Identity:       cfg.Identity,
 		Host:           h,
@@ -119,7 +157,8 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		handlers:       make(map[protocol.MessageType]MessageHandler),
 		convStartTimes: make(map[string]int64),
 		reputationFile: cfg.ReputationFile,
-		ctx:            ctx,
+		ctx:            agentCtx,
+		cancel:         agentCancel,
 	}
 
 	// Initialize L6 cognition if NietzscheDB address is provided
@@ -142,12 +181,20 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 			a.log.Info("cognition engine started", logging.String("name", cfg.Name))
 
 			// Consume desires from cognition engine
-			go a.consumeDesires()
+			a.wg.Add(1)
+			go func() {
+				defer a.wg.Done()
+				a.consumeDesires()
+			}()
 		}
 	}
 
 	// Start conversation timeout reaper
-	go a.reapConversations()
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.reapConversations()
+	}()
 
 	// Register the stream handler
 	h.SetStreamHandler(a.handleMessage)
@@ -379,6 +426,13 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 	conv, exists := a.Conversations.Get(msg.ConversationID)
 	if !exists {
 		conv = a.Conversations.Create(msg.ConversationID, msg.From)
+		if conv == nil {
+			a.log.Warn("max concurrent conversations reached, dropping message",
+				logging.String("from", msg.From[:12]),
+				logging.String("type", string(msg.Type)),
+			)
+			return
+		}
 		// Track start time
 		a.mu.Lock()
 		a.convStartTimes[msg.ConversationID] = time.Now().UnixMilli()
@@ -414,9 +468,68 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 			reply = handler(from, msg)
 		}()
 		if reply != nil {
+			if err := a.signMessage(reply); err != nil {
+				a.log.Error("failed to sign reply", logging.String("type", string(msg.Type)), logging.Err(err))
+				return
+			}
+			if err := a.Host.SendDirect(a.ctx, from, reply); err != nil {
+				a.log.Error("failed to send reply", logging.String("type", string(msg.Type)), logging.String("to", from.String()[:12]), logging.Err(err))
+			}
+		}
+	} else {
+		// Log unhandled message types so they are not silently dropped.
+		a.handleUnregistered(from, msg)
+	}
+}
+
+// handleUnregistered provides default behaviour for message types that have
+// no user-registered handler. PING is answered with PONG automatically;
+// all other unhandled types are logged.
+func (a *Agent) handleUnregistered(from peer.ID, msg *protocol.Message) {
+	switch msg.Type {
+	case protocol.TypePing:
+		// Auto-respond with PONG.
+		var ping protocol.PingPayload
+		_ = json.Unmarshal(msg.Payload, &ping)
+		pong := protocol.PingPayload{Nonce: ping.Nonce, Timestamp: time.Now().UTC()}
+		reply, err := protocol.NewMessage(protocol.TypePong, a.Identity.DID, msg.From, msg.ConversationID, pong)
+		if err == nil {
 			a.signMessage(reply)
 			a.Host.SendDirect(a.ctx, from, reply)
 		}
+
+	case protocol.TypePong:
+		a.log.Info("received PONG", logging.String("from", from.String()[:12]))
+
+	case protocol.TypeDiscover:
+		a.log.Info("received DISCOVER (no handler registered)", logging.String("from", from.String()[:12]))
+
+	case protocol.TypeCapabilityAdvertise:
+		a.log.Info("received CAPABILITY_ADVERTISE (no handler registered)", logging.String("from", from.String()[:12]))
+
+	case protocol.TypeCapabilityQuery:
+		// Auto-respond with our capabilities.
+		a.mu.RLock()
+		caps := make([]Capability, len(a.Capabilities))
+		copy(caps, a.Capabilities)
+		a.mu.RUnlock()
+		reply, err := protocol.NewMessage(protocol.TypeCapabilityAdvertise, a.Identity.DID, msg.From, msg.ConversationID, caps)
+		if err == nil {
+			a.signMessage(reply)
+			a.Host.SendDirect(a.ctx, from, reply)
+		}
+
+	case protocol.TypeError:
+		var errPayload protocol.ErrorPayload
+		_ = json.Unmarshal(msg.Payload, &errPayload)
+		a.log.Warn("received ERROR from peer",
+			logging.String("from", from.String()[:12]),
+			logging.String("code", errPayload.Code),
+			logging.String("message", errPayload.Message),
+		)
+
+	default:
+		a.log.Warn("no handler for message type", logging.String("type", string(msg.Type)), logging.String("from", from.String()[:12]))
 	}
 }
 
@@ -458,7 +571,7 @@ func (a *Agent) recordNegotiationMemory(ctx context.Context, convID string, rece
 
 	// Update NietzscheDB cognition layer if available
 	if a.Cognition != nil {
-		a.Cognition.RecordNegotiation(ctx, cognition.NegotiationMemory{
+		if _, err := a.Cognition.RecordNegotiation(ctx, cognition.NegotiationMemory{
 			ConversationID: convID,
 			PeerDID:        peerDID,
 			Capability:     capability,
@@ -467,10 +580,14 @@ func (a *Agent) recordNegotiationMemory(ctx context.Context, convID string, rece
 			DurationMs:     now - startTime,
 			StartedAt:      startTime,
 			CompletedAt:    now,
-		})
+		}); err != nil {
+			a.log.Warn("failed to record negotiation memory", logging.String("conv", convID), logging.Err(err))
+		}
 
 		// Update trust score (cognition layer)
-		a.Cognition.RecordInteraction(ctx, peerDID, receipt.Accepted, float64(now-startTime))
+		if err := a.Cognition.RecordInteraction(ctx, peerDID, receipt.Accepted, float64(now-startTime)); err != nil {
+			a.log.Warn("failed to record interaction for trust", logging.String("peer", peerDID[:20]), logging.Err(err))
+		}
 	}
 
 	// Update standalone reputation layer (always available)
@@ -485,15 +602,18 @@ func (a *Agent) recordNegotiationMemory(ctx context.Context, convID string, rece
 // cacheCapabilityFromPropose extracts capability info from a PROPOSE and caches it.
 func (a *Agent) cacheCapabilityFromPropose(msg *protocol.Message) {
 	var propose protocol.ProposePayload
-	if json.Unmarshal(msg.Payload, &propose) != nil {
+	if err := json.Unmarshal(msg.Payload, &propose); err != nil {
+		a.log.Warn("failed to unmarshal propose for capability cache", logging.String("from", msg.From[:20]), logging.Err(err))
 		return
 	}
 
-	a.Cognition.CacheCapability(a.ctx, cognition.PeerCapability{
+	if err := a.Cognition.CacheCapability(a.ctx, cognition.PeerCapability{
 		PeerDID:     msg.From,
 		Name:        propose.Capability,
 		Description: propose.Approach,
-	})
+	}); err != nil {
+		a.log.Warn("failed to cache capability from propose", logging.String("capability", propose.Capability), logging.Err(err))
+	}
 }
 
 func (a *Agent) signMessage(msg *protocol.Message) error {
@@ -521,51 +641,60 @@ func (a *Agent) PeerID() peer.ID {
 
 // consumeDesires reads desires from the cognition engine channel and converts
 // them into INTENT messages sent to peers that advertise the required capability.
+// It exits when the desires channel is closed or the agent context is cancelled.
 func (a *Agent) consumeDesires() {
-	for desire := range a.Engine.Desires() {
-		if a.Cognition == nil {
-			continue
-		}
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case desire, ok := <-a.Engine.Desires():
+			if !ok {
+				return // channel closed
+			}
+			if a.Cognition == nil {
+				continue
+			}
 
-		// Find peers that can fulfill this desire
-		peers, err := a.Cognition.FindPeersWithCapability(a.ctx, desire.Capability, 0.3, 5)
-		if err != nil || len(peers) == 0 {
-			a.log.Warn("desire: no peers found",
+			// Find peers that can fulfill this desire
+			peers, err := a.Cognition.FindPeersWithCapability(a.ctx, desire.Capability, 0.3, 5)
+			if err != nil || len(peers) == 0 {
+				a.log.Warn("desire: no peers found",
+					logging.String("desire_id", desire.ID),
+					logging.String("capability", desire.Capability),
+				)
+				continue
+			}
+
+			// Use the best peer (list is pre-sorted by trust)
+			bestPeer := peers[0]
+			targetID, err := peer.Decode(bestPeer.PeerDID)
+			if err != nil {
+				a.log.Error("desire: failed to decode peer DID",
+					logging.String("desire_id", desire.ID),
+					logging.String("peer_did", bestPeer.PeerDID),
+					logging.Err(err),
+				)
+				continue
+			}
+
+			intent := protocol.IntentPayload{
+				Capability:  desire.Capability,
+				Description: desire.Description,
+			}
+			_, err = a.SendIntent(a.ctx, targetID, intent)
+			if err != nil {
+				a.log.Error("desire: failed to send intent",
+					logging.String("desire_id", desire.ID),
+					logging.Err(err),
+				)
+				continue
+			}
+			a.log.Info("desire: sent intent",
 				logging.String("desire_id", desire.ID),
+				logging.String("peer", bestPeer.PeerDID),
 				logging.String("capability", desire.Capability),
 			)
-			continue
 		}
-
-		// Use the best peer (list is pre-sorted by trust)
-		bestPeer := peers[0]
-		targetID, err := peer.Decode(bestPeer.PeerDID)
-		if err != nil {
-			a.log.Error("desire: failed to decode peer DID",
-				logging.String("desire_id", desire.ID),
-				logging.String("peer_did", bestPeer.PeerDID),
-				logging.Err(err),
-			)
-			continue
-		}
-
-		intent := protocol.IntentPayload{
-			Capability:  desire.Capability,
-			Description: desire.Description,
-		}
-		_, err = a.SendIntent(a.ctx, targetID, intent)
-		if err != nil {
-			a.log.Error("desire: failed to send intent",
-				logging.String("desire_id", desire.ID),
-				logging.Err(err),
-			)
-			continue
-		}
-		a.log.Info("desire: sent intent",
-			logging.String("desire_id", desire.ID),
-			logging.String("peer", bestPeer.PeerDID),
-			logging.String("capability", desire.Capability),
-		)
 	}
 }
 
@@ -587,19 +716,27 @@ func (a *Agent) reapConversations() {
 }
 
 // Close shuts down the agent, saves reputation data, and stops the cognition engine.
+// It cancels the agent context, waits for all background goroutines to finish,
+// and then closes the network host.
 func (a *Agent) Close() error {
-	// Stop the cognition engine if running
+	// Cancel the agent context to signal all background goroutines
+	// (reapConversations, consumeDesires) to stop.
+	a.cancel()
+
+	// Stop the cognition engine if running. This closes the desires channel,
+	// which unblocks consumeDesires.
 	if a.Engine != nil {
 		a.Engine.Stop()
 	}
+
+	// Wait for all agent-owned goroutines to finish.
+	a.wg.Wait()
 
 	if a.Cognition != nil {
 		a.Cognition.Close()
 	}
 
 	// Save reputation to file if a path was configured.
-	// We check by attempting to save; the reputationFile is stored via closure
-	// in the agent's config. Since Config is not stored, we use a helper field.
 	if a.reputationFile != "" && a.Reputation != nil {
 		if err := a.Reputation.Save(a.reputationFile); err != nil {
 			a.log.Warn("failed to save reputation", logging.Err(err))
@@ -628,6 +765,9 @@ func (a *Agent) Info() string {
 	if a.Cognition != nil {
 		info["collection"] = a.Cognition.Collection()
 	}
-	data, _ := json.MarshalIndent(info, "", "  ")
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("{\"error\": \"marshal agent info: %v\"}", err)
+	}
 	return string(data)
 }

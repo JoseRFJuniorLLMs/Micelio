@@ -128,20 +128,23 @@ func (id *Identity) Save(path string) error {
 	}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("identity: marshal: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("identity: write to %s: %w", path, err)
+	}
+	return nil
 }
 
 // Load reads an identity from a JSON file.
 func Load(path string) (*Identity, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("identity: read from %s: %w", path, err)
 	}
 	var p persistedIdentity
 	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("identity: unmarshal: %w", err)
 	}
 	seed, err := base64.StdEncoding.DecodeString(p.PrivateKeySeed)
 	if err != nil {
@@ -206,16 +209,19 @@ func (id *Identity) SaveEncrypted(path string, passphrase string) error {
 	}
 	data, err := json.MarshalIndent(enc, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("identity: marshal encrypted: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("identity: write encrypted to %s: %w", path, err)
+	}
+	return nil
 }
 
 // LoadEncrypted reads an AES-256-GCM encrypted identity from a JSON file.
 func LoadEncrypted(path string, passphrase string) (*Identity, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("identity: read encrypted from %s: %w", path, err)
 	}
 	var enc encryptedIdentity
 	if err := json.Unmarshal(data, &enc); err != nil {

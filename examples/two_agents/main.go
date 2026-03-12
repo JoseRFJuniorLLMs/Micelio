@@ -89,7 +89,10 @@ func main() {
 
 	bob.OnMessage(protocol.TypeIntent, func(from peer.ID, msg *protocol.Message) *protocol.Message {
 		var intent protocol.IntentPayload
-		json.Unmarshal(msg.Payload, &intent)
+		if err := json.Unmarshal(msg.Payload, &intent); err != nil {
+			fmt.Fprintf(os.Stderr, "[Bob] unmarshal intent: %v\n", err)
+			return nil
+		}
 
 		fmt.Printf("\n[Bob] received INTENT: %q\n", intent.Description)
 		fmt.Printf("[Bob] capability requested: %s\n", intent.Capability)
@@ -100,13 +103,17 @@ func main() {
 			Conditions: []string{"text must be under 1000 chars"},
 		}
 
-		reply, _ := protocol.NewMessage(
+		reply, err := protocol.NewMessage(
 			protocol.TypePropose,
 			bob.DID(),
 			msg.From,
 			msg.ConversationID,
 			propose,
 		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[Bob] create propose message: %v\n", err)
+			return nil
+		}
 		fmt.Printf("[Bob] sending PROPOSE: %q\n", propose.Approach)
 		return reply
 	})
@@ -121,7 +128,11 @@ func main() {
 			"source_lang": "en",
 			"target_lang": "pt",
 		}
-		resultJSON, _ := json.Marshal(result)
+		resultJSON, err := json.Marshal(result)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[Bob] marshal result: %v\n", err)
+			return nil
+		}
 
 		deliver := protocol.DeliverPayload{
 			Result: resultJSON,
@@ -131,13 +142,17 @@ func main() {
 			},
 		}
 
-		reply, _ := protocol.NewMessage(
+		reply, err := protocol.NewMessage(
 			protocol.TypeDeliver,
 			bob.DID(),
 			msg.From,
 			msg.ConversationID,
 			deliver,
 		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[Bob] create deliver message: %v\n", err)
+			return nil
+		}
 		fmt.Printf("[Bob] sending DELIVER: translation complete\n")
 		return reply
 	})
@@ -146,7 +161,10 @@ func main() {
 
 	alice.OnMessage(protocol.TypePropose, func(from peer.ID, msg *protocol.Message) *protocol.Message {
 		var propose protocol.ProposePayload
-		json.Unmarshal(msg.Payload, &propose)
+		if err := json.Unmarshal(msg.Payload, &propose); err != nil {
+			fmt.Fprintf(os.Stderr, "[Alice] unmarshal propose: %v\n", err)
+			return nil
+		}
 
 		fmt.Printf("\n[Alice] received PROPOSE: %q\n", propose.Approach)
 
@@ -158,22 +176,32 @@ func main() {
 
 		fmt.Printf("[Alice] sending ACCEPT\n")
 
-		reply, _ := protocol.NewMessage(
+		reply, err := protocol.NewMessage(
 			protocol.TypeAccept,
 			alice.DID(),
 			msg.From,
 			msg.ConversationID,
 			nil,
 		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[Alice] create accept message: %v\n", err)
+			return nil
+		}
 		return reply
 	})
 
 	alice.OnMessage(protocol.TypeDeliver, func(from peer.ID, msg *protocol.Message) *protocol.Message {
 		var deliver protocol.DeliverPayload
-		json.Unmarshal(msg.Payload, &deliver)
+		if err := json.Unmarshal(msg.Payload, &deliver); err != nil {
+			fmt.Fprintf(os.Stderr, "[Alice] unmarshal deliver: %v\n", err)
+			return nil
+		}
 
 		var result map[string]string
-		json.Unmarshal(deliver.Result, &result)
+		if err := json.Unmarshal(deliver.Result, &result); err != nil {
+			fmt.Fprintf(os.Stderr, "[Alice] unmarshal deliver result: %v\n", err)
+			return nil
+		}
 
 		fmt.Printf("\n[Alice] received DELIVER:\n")
 		fmt.Printf("  Original:   %s\n", result["original"])
@@ -188,7 +216,9 @@ func main() {
 		fmt.Printf("[Alice] sending RECEIPT (rating: 5/5)\n")
 
 		// Use SendReceipt to trigger L6 memory recording
-		alice.SendReceipt(ctx, from, msg.ConversationID, receipt)
+		if err := alice.SendReceipt(ctx, from, msg.ConversationID, receipt); err != nil {
+			fmt.Fprintf(os.Stderr, "[Alice] send receipt: %v\n", err)
+		}
 
 		go func() {
 			time.Sleep(200 * time.Millisecond)
@@ -201,11 +231,19 @@ func main() {
 				trust := alice.Cognition.GetTrustScore(ctx, bob.DID())
 				fmt.Printf("[L6] Bob's trust score after interaction: %.2f\n", trust)
 
-				history, _ := alice.Cognition.GetRecentNegotiations(ctx, 5)
-				fmt.Printf("[L6] Total negotiations in memory: %d\n", len(history))
+				history, err := alice.Cognition.GetRecentNegotiations(ctx, 5)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[L6] get recent negotiations: %v\n", err)
+				} else {
+					fmt.Printf("[L6] Total negotiations in memory: %d\n", len(history))
+				}
 
-				caps, _ := alice.Cognition.FindPeersWithCapability(ctx, "nlp.translate", 0.0, 5)
-				fmt.Printf("[L6] Peers cached with nlp.translate: %d\n", len(caps))
+				caps, err := alice.Cognition.FindPeersWithCapability(ctx, "nlp.translate", 0.0, 5)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[L6] find peers with capability: %v\n", err)
+				} else {
+					fmt.Printf("[L6] Peers cached with nlp.translate: %d\n", len(caps))
+				}
 			}
 
 			close(done)
@@ -217,7 +255,10 @@ func main() {
 
 	bob.OnMessage(protocol.TypeReceipt, func(from peer.ID, msg *protocol.Message) *protocol.Message {
 		var receipt protocol.ReceiptPayload
-		json.Unmarshal(msg.Payload, &receipt)
+		if err := json.Unmarshal(msg.Payload, &receipt); err != nil {
+			fmt.Fprintf(os.Stderr, "[Bob] unmarshal receipt: %v\n", err)
+			return nil
+		}
 
 		fmt.Printf("\n[Bob] received RECEIPT: accepted=%v, rating=%d/5\n", receipt.Accepted, receipt.Rating)
 		fmt.Printf("[Bob] feedback: %q\n", receipt.Feedback)

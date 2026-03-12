@@ -28,7 +28,7 @@ func (ts *TrustStore) Save(path string) error {
 		return fmt.Errorf("reputation: marshal trust store: %w", err)
 	}
 
-	if err := os.WriteFile(path, raw, 0644); err != nil {
+	if err := os.WriteFile(path, raw, 0600); err != nil {
 		return fmt.Errorf("reputation: write trust store to %s: %w", path, err)
 	}
 

@@ -12,9 +12,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/agent"
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/identity"
@@ -43,17 +45,19 @@ func printUsage() {
 	fmt.Println("Micélio — Agent Internet Protocol (AIP)")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  micelio keygen [--output FILE]   Generate a new agent identity")
-	fmt.Println("  micelio agent [--port PORT] [--identity FILE]  Start an agent node")
-	fmt.Println("  micelio info --identity FILE     Show identity info")
+	fmt.Println("  micelio keygen [--output FILE]             Generate a new agent identity")
+	fmt.Println("  micelio agent [--name NAME] [--port PORT]  Start an agent node")
+	fmt.Println("                [--identity FILE]")
+	fmt.Println("  micelio info --identity FILE               Show identity info")
 	fmt.Println()
 	fmt.Println("Run the two-agent demo:")
 	fmt.Println("  go run ./examples/two_agents/")
 	fmt.Println()
 	fmt.Println("Environment Variables:")
-	fmt.Println("  MICELIO_PORT              Agent listen port (default: 9000)")
+	fmt.Println("  MICELIO_NAME              Agent name (required, default: micelio-node)")
+	fmt.Println("  MICELIO_PORT              Agent listen port (default: 9000, range: 0 or 1024-65535)")
 	fmt.Println("  MICELIO_IDENTITY          Path to identity JSON file")
-	fmt.Println("  MICELIO_NIETZSCHE_ADDR    NietzscheDB gRPC address (e.g., localhost:50051)")
+	fmt.Println("  MICELIO_NIETZSCHE_ADDR    NietzscheDB gRPC address (host:port, e.g., localhost:50051)")
 	fmt.Println("  MICELIO_REPUTATION_FILE   Path to reputation persistence file")
 	fmt.Println("  MICELIO_ENABLE_DHT        Enable DHT discovery (true/1)")
 }
@@ -83,7 +87,8 @@ func cmdKeygen() {
 }
 
 func cmdAgent() {
-	port := 9000
+	name := ""
+	port := -1 // sentinel: not set via flag
 	identityFile := ""
 
 	for i := 2; i < len(os.Args)-1; i++ {
@@ -91,34 +96,76 @@ func cmdAgent() {
 		case "--port", "-p":
 			p, err := strconv.Atoi(os.Args[i+1])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "invalid port: %s\n", os.Args[i+1])
+				fmt.Fprintf(os.Stderr, "error: invalid port %q: %v\n", os.Args[i+1], err)
 				os.Exit(1)
 			}
 			port = p
 		case "--identity", "-i":
 			identityFile = os.Args[i+1]
+		case "--name", "-n":
+			name = os.Args[i+1]
 		}
 	}
 
-	// Environment variable fallbacks
-	if port == 9000 { // default value, check env
+	// ---- Environment variable fallbacks with validation ----
+
+	// Name: flag > env > default
+	if name == "" {
+		name = os.Getenv("MICELIO_NAME")
+	}
+	if name == "" {
+		name = "micelio-node"
+	}
+
+	// Port: flag > env > default (9000)
+	if port < 0 {
 		if envPort := os.Getenv("MICELIO_PORT"); envPort != "" {
-			if p, err := strconv.Atoi(envPort); err == nil {
-				port = p
+			p, err := strconv.Atoi(envPort)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: MICELIO_PORT %q is not a valid integer: %v\n", envPort, err)
+				os.Exit(1)
 			}
+			port = p
+		} else {
+			port = 9000
 		}
 	}
+	if port < 0 || port > 65535 {
+		fmt.Fprintf(os.Stderr, "error: port %d out of range (0-65535)\n", port)
+		os.Exit(1)
+	}
+
 	if identityFile == "" {
 		identityFile = os.Getenv("MICELIO_IDENTITY")
 	}
+
 	nietzscheAddr := os.Getenv("MICELIO_NIETZSCHE_ADDR")
+	if nietzscheAddr != "" {
+		// Validate host:port format
+		host, _, err := net.SplitHostPort(nietzscheAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: MICELIO_NIETZSCHE_ADDR %q is not valid host:port: %v\n", nietzscheAddr, err)
+			os.Exit(1)
+		}
+		if strings.TrimSpace(host) == "" {
+			fmt.Fprintf(os.Stderr, "error: MICELIO_NIETZSCHE_ADDR host part must not be empty\n")
+			os.Exit(1)
+		}
+	}
+
 	reputationFile := os.Getenv("MICELIO_REPUTATION_FILE")
-	enableDHT := os.Getenv("MICELIO_ENABLE_DHT") == "true" || os.Getenv("MICELIO_ENABLE_DHT") == "1"
+
+	dhtEnv := os.Getenv("MICELIO_ENABLE_DHT")
+	enableDHT := dhtEnv == "true" || dhtEnv == "1"
+	if dhtEnv != "" && !enableDHT && dhtEnv != "false" && dhtEnv != "0" {
+		fmt.Fprintf(os.Stderr, "warning: MICELIO_ENABLE_DHT=%q not recognized, expected true/1/false/0\n", dhtEnv)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	cfg := agent.Config{
+		Name:           name,
 		Port:           port,
 		NietzscheAddr:  nietzscheAddr,
 		ReputationFile: reputationFile,
@@ -141,7 +188,7 @@ func cmdAgent() {
 	}
 	defer a.Close()
 
-	fmt.Println("Micélio Agent started")
+	fmt.Println("Micelio Agent started")
 	fmt.Println(a.Info())
 	fmt.Println()
 	fmt.Println("Listening for peers... (Ctrl+C to stop)")
@@ -173,6 +220,10 @@ func cmdInfo() {
 		"did":  id.DID,
 		"file": identityFile,
 	}
-	data, _ := json.MarshalIndent(info, "", "  ")
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "marshal info: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Println(string(data))
 }

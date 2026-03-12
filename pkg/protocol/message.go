@@ -65,7 +65,7 @@ type CapabilityAd struct {
 	Name        string          `json:"name"`
 	Version     string          `json:"version"`
 	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 	Tags        []string        `json:"tags,omitempty"`
 }
@@ -181,4 +181,140 @@ type ErrorPayload struct {
 type PingPayload struct {
 	Nonce     string    `json:"nonce"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+const (
+	// MaxTTL is the maximum allowed TTL in seconds (1 hour).
+	MaxTTL = 3600
+
+	// MaxFieldLength is the maximum allowed length for string fields (From, To, ConversationID).
+	MaxFieldLength = 512
+)
+
+// validMessageTypes is the set of known AIP message types.
+var validMessageTypes = map[MessageType]bool{
+	TypeIntent:              true,
+	TypePropose:             true,
+	TypeCounter:             true,
+	TypeAccept:              true,
+	TypeReject:              true,
+	TypeDeliver:             true,
+	TypeReceipt:             true,
+	TypeCancel:              true,
+	TypeDiscover:            true,
+	TypeCapabilityAdvertise: true,
+	TypeCapabilityQuery:     true,
+	TypePing:                true,
+	TypePong:                true,
+	TypeError:               true,
+}
+
+// Validate checks the message for valid required fields, known type, and
+// reasonable TTL. It is a method form of ValidateMessage.
+func (m *Message) Validate() error {
+	return ValidateMessage(m)
+}
+
+// ValidateMessage checks that a message has valid, non-empty required fields,
+// a known message type, and reasonable TTL values. Returns an error describing
+// the first validation failure, or nil if the message is valid.
+func ValidateMessage(msg *Message) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+
+	// Validate From
+	if msg.From == "" {
+		return fmt.Errorf("message field 'from' is empty")
+	}
+	if len(msg.From) > MaxFieldLength {
+		return fmt.Errorf("message field 'from' exceeds max length (%d > %d)", len(msg.From), MaxFieldLength)
+	}
+
+	// Validate To
+	if msg.To == "" {
+		return fmt.Errorf("message field 'to' is empty")
+	}
+	if len(msg.To) > MaxFieldLength {
+		return fmt.Errorf("message field 'to' exceeds max length (%d > %d)", len(msg.To), MaxFieldLength)
+	}
+
+	// Validate ConversationID
+	if msg.ConversationID == "" {
+		return fmt.Errorf("message field 'conversation_id' is empty")
+	}
+	if len(msg.ConversationID) > MaxFieldLength {
+		return fmt.Errorf("message field 'conversation_id' exceeds max length (%d > %d)", len(msg.ConversationID), MaxFieldLength)
+	}
+
+	// Validate MsgID
+	if msg.MsgID == "" {
+		return fmt.Errorf("message field 'msg_id' is empty")
+	}
+
+	// Validate message type
+	if !validMessageTypes[msg.Type] {
+		return fmt.Errorf("unknown message type: %q", msg.Type)
+	}
+
+	// Validate TTL
+	if msg.TTL < 0 {
+		return fmt.Errorf("message TTL is negative: %d", msg.TTL)
+	}
+	if msg.TTL > MaxTTL {
+		return fmt.Errorf("message TTL exceeds maximum (%d > %d)", msg.TTL, MaxTTL)
+	}
+
+	// Validate timestamp is not zero
+	if msg.Timestamp.IsZero() {
+		return fmt.Errorf("message timestamp is zero")
+	}
+
+	// Validate payload is present for types that require it
+	switch msg.Type {
+	case TypeIntent:
+		if len(msg.Payload) == 0 {
+			return fmt.Errorf("INTENT message requires a payload")
+		}
+		var intent IntentPayload
+		if err := json.Unmarshal(msg.Payload, &intent); err != nil {
+			return fmt.Errorf("INTENT payload invalid: %w", err)
+		}
+		if intent.Capability == "" {
+			return fmt.Errorf("INTENT payload missing required field 'capability'")
+		}
+
+	case TypePropose:
+		if len(msg.Payload) == 0 {
+			return fmt.Errorf("PROPOSE message requires a payload")
+		}
+		var propose ProposePayload
+		if err := json.Unmarshal(msg.Payload, &propose); err != nil {
+			return fmt.Errorf("PROPOSE payload invalid: %w", err)
+		}
+		if propose.Capability == "" {
+			return fmt.Errorf("PROPOSE payload missing required field 'capability'")
+		}
+
+	case TypeDeliver:
+		if len(msg.Payload) == 0 {
+			return fmt.Errorf("DELIVER message requires a payload")
+		}
+
+	case TypeCounter:
+		if len(msg.Payload) == 0 {
+			return fmt.Errorf("COUNTER message requires a payload")
+		}
+		var counter CounterPayload
+		if err := json.Unmarshal(msg.Payload, &counter); err != nil {
+			return fmt.Errorf("COUNTER payload invalid: %w", err)
+		}
+
+	case TypeAccept, TypeReceipt, TypeCancel, TypeReject,
+		TypePing, TypePong, TypeDiscover,
+		TypeCapabilityAdvertise, TypeCapabilityQuery, TypeError:
+		// These types may or may not have payloads; no strict requirement.
+	}
+
+	return nil
 }

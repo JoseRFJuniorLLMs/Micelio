@@ -15,8 +15,12 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/JoseRFJuniorLLMs/Micelio/pkg/logging"
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/protocol"
 )
+
+// gossipLog is a package-level logger for gossip broadcasting.
+var gossipLog = logging.New("gossip")
 
 // capabilitiesTopicName is the GossipSub topic for capability advertisements.
 const capabilitiesTopicName = "aip/capabilities/v1"
@@ -93,7 +97,7 @@ func (g *GossipBroadcaster) BroadcastCapability(ctx context.Context, capAd proto
 		return fmt.Errorf("publish capability ad: %w", err)
 	}
 
-	fmt.Printf("[gossip] broadcast capability %q v%s\n", capAd.Name, capAd.Version)
+	gossipLog.Debug("broadcast capability", logging.String("capability", capAd.Name), logging.String("version", capAd.Version))
 	return nil
 }
 
@@ -120,7 +124,7 @@ func (g *GossipBroadcaster) SubscribeCapabilities(ctx context.Context) {
 				if ctx.Err() != nil || g.ctx.Err() != nil {
 					return // context cancelled, clean shutdown
 				}
-				fmt.Printf("[gossip] error reading capabilities: %v\n", err)
+				gossipLog.Error("error reading capabilities", logging.Err(err))
 				return
 			}
 
@@ -131,11 +135,11 @@ func (g *GossipBroadcaster) SubscribeCapabilities(ctx context.Context) {
 
 			var capAd protocol.CapabilityAd
 			if err := json.Unmarshal(msg.Data, &capAd); err != nil {
-				fmt.Printf("[gossip] invalid capability ad from %s: %v\n", msg.ReceivedFrom.String()[:12], err)
+				gossipLog.Warn("invalid capability ad", logging.String("peer", msg.ReceivedFrom.String()[:12]), logging.Err(err))
 				continue
 			}
 
-			fmt.Printf("[gossip] received capability %q from %s\n", capAd.Name, msg.ReceivedFrom.String()[:12])
+			gossipLog.Debug("received capability", logging.String("capability", capAd.Name), logging.String("peer", msg.ReceivedFrom.String()[:12]))
 
 			// Dispatch to registered handlers
 			g.mu.RLock()

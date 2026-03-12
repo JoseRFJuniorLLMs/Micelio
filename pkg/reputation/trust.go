@@ -9,6 +9,22 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/JoseRFJuniorLLMs/Micelio/pkg/logging"
+)
+
+// reputationLog is a package-level logger for reputation operations.
+var reputationLog = logging.New("reputation")
+
+const (
+	// MaxPeerRecords limits the number of tracked peers to prevent
+	// unbounded memory growth from many unique peer DIDs.
+	MaxPeerRecords = 50000
+
+	// MaxLatencySamples limits the number of latency data points retained
+	// per peer. Since we use EMA, we don't need historical samples, but
+	// this guards against any future changes that might accumulate them.
+	MaxLatencySamples = 1000
 )
 
 // TrustRecord tracks the reputation of a peer agent.
@@ -186,9 +202,14 @@ func (ts *TrustStore) SetRecords(records map[string]*TrustRecord) {
 
 // getOrCreate returns the trust record for a peer, creating one if it does not exist.
 // Must be called with ts.mu held for writing.
+// If MaxPeerRecords is reached, stale peers (lowest score, oldest) are evicted.
 func (ts *TrustStore) getOrCreate(peerDID string) *TrustRecord {
 	r, ok := ts.peers[peerDID]
 	if !ok {
+		// Enforce max peer records to prevent memory exhaustion
+		if len(ts.peers) >= MaxPeerRecords {
+			ts.evictStalePeers()
+		}
 		r = &TrustRecord{
 			PeerDID: peerDID,
 			Score:   0.5, // neutral default
@@ -196,6 +217,38 @@ func (ts *TrustStore) getOrCreate(peerDID string) *TrustRecord {
 		ts.peers[peerDID] = r
 	}
 	return r
+}
+
+// evictStalePeers removes peers that haven't been seen in over 24 hours and have
+// low scores. Must be called with ts.mu held for writing.
+func (ts *TrustStore) evictStalePeers() {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	evicted := 0
+
+	for did, r := range ts.peers {
+		if r.LastSeen.Before(cutoff) && !r.Blocked && r.Score < 0.3 {
+			delete(ts.peers, did)
+			evicted++
+		}
+	}
+
+	// If still at capacity, evict oldest non-blocked peers
+	if len(ts.peers) >= MaxPeerRecords {
+		oldestCutoff := time.Now().Add(-7 * 24 * time.Hour)
+		for did, r := range ts.peers {
+			if r.LastSeen.Before(oldestCutoff) && !r.Blocked {
+				delete(ts.peers, did)
+				evicted++
+				if len(ts.peers) < MaxPeerRecords*9/10 {
+					break
+				}
+			}
+		}
+	}
+
+	if evicted > 0 {
+		reputationLog.Info("evicted stale peer records", logging.Int("evicted", evicted), logging.Int("remaining", len(ts.peers)))
+	}
 }
 
 // computeScore calculates the trust score from interaction history.

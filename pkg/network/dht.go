@@ -18,6 +18,18 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
+
+	"github.com/JoseRFJuniorLLMs/Micelio/pkg/logging"
+)
+
+// dhtLog is a package-level logger for DHT discovery.
+var dhtLog = logging.New("dht")
+
+// DHT re-bootstrap interval. The routing table can become stale if peers
+// leave the network, so we periodically re-bootstrap.
+const (
+	dhtReBootstrapInterval = 5 * time.Minute
+	dhtBootstrapTimeout    = 15 * time.Second
 )
 
 // capabilityNamespace returns the DHT namespace for a given capability name.
@@ -78,9 +90,34 @@ func NewDHTDiscovery(ctx context.Context, h host.Host, bootstrapPeers []peer.Add
 // Bootstrap connects to the bootstrap peers and initializes the DHT routing
 // table. This should be called once after creating the DHTDiscovery. It
 // connects to bootstrap peers in parallel and then triggers a DHT bootstrap
-// to populate the routing table.
+// to populate the routing table. A background goroutine periodically
+// re-bootstraps to keep the routing table fresh.
 func (d *DHTDiscovery) Bootstrap() error {
-	// Connect to bootstrap peers in parallel
+	connected := d.connectBootstrapPeers()
+
+	dhtLog.Info("bootstrap peers connected", logging.Int("connected", int(connected)), logging.Int("total", len(d.bootstrapPeers)))
+
+	if connected == 0 {
+		return fmt.Errorf("dht: bootstrap failed, could not connect to any peer")
+	}
+
+	// Bootstrap the DHT routing table
+	if err := d.dht.Bootstrap(d.ctx); err != nil {
+		return fmt.Errorf("bootstrap DHT: %w", err)
+	}
+
+	dhtLog.Info("DHT bootstrap complete")
+
+	// Start periodic re-bootstrap in the background.
+	d.wg.Add(1)
+	go d.reBootstrapLoop()
+
+	return nil
+}
+
+// connectBootstrapPeers connects to all bootstrap peers in parallel and
+// returns the number of successful connections.
+func (d *DHTDiscovery) connectBootstrapPeers() int64 {
 	var wg sync.WaitGroup
 	var connected int64
 
@@ -91,33 +128,52 @@ func (d *DHTDiscovery) Bootstrap() error {
 		wg.Add(1)
 		go func(pi peer.AddrInfo) {
 			defer wg.Done()
-			connectCtx, connectCancel := context.WithTimeout(d.ctx, 15*time.Second)
+			connectCtx, connectCancel := context.WithTimeout(d.ctx, dhtBootstrapTimeout)
 			defer connectCancel()
 
 			if err := d.host.Connect(connectCtx, pi); err != nil {
-				fmt.Printf("[dht] bootstrap connect to %s failed: %v\n", pi.ID.String()[:12], err)
+				dhtLog.Debug("bootstrap connect failed", logging.String("peer", pi.ID.String()[:12]), logging.Err(err))
 				return
 			}
 			atomic.AddInt64(&connected, 1)
-			fmt.Printf("[dht] connected to bootstrap peer: %s\n", pi.ID.String()[:12])
+			dhtLog.Debug("connected to bootstrap peer", logging.String("peer", pi.ID.String()[:12]))
 		}(pi)
 	}
 	wg.Wait()
 
-	finalConnected := atomic.LoadInt64(&connected)
-	fmt.Printf("[dht] connected to %d/%d bootstrap peers\n", finalConnected, len(d.bootstrapPeers))
+	return atomic.LoadInt64(&connected)
+}
 
-	if finalConnected == 0 {
-		return fmt.Errorf("dht: bootstrap failed, could not connect to any peer")
+// reBootstrapLoop periodically re-connects to bootstrap peers and refreshes
+// the DHT routing table. This keeps the routing table healthy when peers
+// churn or network conditions change.
+func (d *DHTDiscovery) reBootstrapLoop() {
+	defer d.wg.Done()
+
+	ticker := time.NewTicker(dhtReBootstrapInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+			dhtLog.Debug("periodic re-bootstrap starting")
+
+			connected := d.connectBootstrapPeers()
+			dhtLog.Debug("re-bootstrap peers connected", logging.Int("connected", int(connected)), logging.Int("total", len(d.bootstrapPeers)))
+
+			if connected > 0 {
+				if err := d.dht.Bootstrap(d.ctx); err != nil {
+					dhtLog.Warn("re-bootstrap DHT table refresh failed", logging.Err(err))
+				} else {
+					dhtLog.Debug("re-bootstrap complete")
+				}
+			} else {
+				dhtLog.Warn("re-bootstrap: no bootstrap peers reachable, will retry next cycle")
+			}
+		}
 	}
-
-	// Bootstrap the DHT routing table
-	if err := d.dht.Bootstrap(d.ctx); err != nil {
-		return fmt.Errorf("bootstrap DHT: %w", err)
-	}
-
-	fmt.Println("[dht] DHT bootstrap complete")
-	return nil
 }
 
 // AdvertiseCapability registers this peer as a provider of the given
@@ -149,7 +205,7 @@ func (d *DHTDiscovery) AdvertiseCapability(ctx context.Context, capabilityName s
 		return fmt.Errorf("advertise capability %q: %w", capabilityName, err)
 	}
 
-	fmt.Printf("[dht] advertising capability %q (re-advertise every %v)\n", capabilityName, ttl)
+	dhtLog.Info("advertising capability", logging.String("capability", capabilityName), logging.Duration("ttl", ttl))
 
 	// Background re-advertise loop
 	d.wg.Add(1)
@@ -164,7 +220,7 @@ func (d *DHTDiscovery) AdvertiseCapability(ctx context.Context, capabilityName s
 			case <-ticker.C:
 				readvCtx, readvCancel := context.WithTimeout(advCtx, 60*time.Second)
 				if _, err := d.routingD.Advertise(readvCtx, ns); err != nil {
-					fmt.Printf("[dht] re-advertise capability %q failed: %v\n", capabilityName, err)
+					dhtLog.Warn("re-advertise capability failed", logging.String("capability", capabilityName), logging.Err(err))
 				}
 				readvCancel()
 			}
@@ -182,7 +238,7 @@ func (d *DHTDiscovery) StopAdvertisingCapability(capabilityName string) {
 	if cancel, exists := d.advertisedCaps[capabilityName]; exists {
 		cancel()
 		delete(d.advertisedCaps, capabilityName)
-		fmt.Printf("[dht] stopped advertising capability %q\n", capabilityName)
+		dhtLog.Info("stopped advertising capability", logging.String("capability", capabilityName))
 	}
 }
 
@@ -193,7 +249,7 @@ func (d *DHTDiscovery) StopAdvertisingCapability(capabilityName string) {
 func (d *DHTDiscovery) FindCapabilityProviders(ctx context.Context, capabilityName string, limit int) ([]peer.AddrInfo, error) {
 	ns := capabilityNamespace(capabilityName)
 
-	fmt.Printf("[dht] searching for providers of capability %q (limit %d)\n", capabilityName, limit)
+	dhtLog.Debug("searching for capability providers", logging.String("capability", capabilityName), logging.Int("limit", limit))
 
 	peerCh, err := d.routingD.FindPeers(ctx, ns, discovery.Limit(limit))
 	if err != nil {
@@ -208,7 +264,7 @@ func (d *DHTDiscovery) FindCapabilityProviders(ctx context.Context, capabilityNa
 		providers = append(providers, pi)
 	}
 
-	fmt.Printf("[dht] found %d providers for capability %q\n", len(providers), capabilityName)
+	dhtLog.Debug("found capability providers", logging.Int("count", len(providers)), logging.String("capability", capabilityName))
 	return providers, nil
 }
 
@@ -262,12 +318,12 @@ func parseBootstrapPeers(addrs []string) []peer.AddrInfo {
 	for _, addr := range addrs {
 		ma, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
-			fmt.Printf("[dht] invalid bootstrap addr %q: %v\n", addr, err)
+			dhtLog.Warn("invalid bootstrap addr", logging.String("addr", addr), logging.Err(err))
 			continue
 		}
 		pi, err := peer.AddrInfoFromP2pAddr(ma)
 		if err != nil {
-			fmt.Printf("[dht] invalid bootstrap peer %q: %v\n", addr, err)
+			dhtLog.Warn("invalid bootstrap peer", logging.String("addr", addr), logging.Err(err))
 			continue
 		}
 		peers = append(peers, *pi)

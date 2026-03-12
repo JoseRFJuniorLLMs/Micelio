@@ -7,7 +7,12 @@ import (
 	"time"
 
 	nietzsche "nietzsche-sdk"
+
+	"github.com/JoseRFJuniorLLMs/Micelio/pkg/logging"
 )
+
+// memoryLog is a package-level logger for negotiation memory operations.
+var memoryLog = logging.New("cognition")
 
 // NegotiationMemory is an episodic record of a completed AIP negotiation.
 // Stored as Episodic nodes in the Poincare ball.
@@ -146,21 +151,23 @@ func (s *Store) linkToPreviousNegotiation(ctx context.Context, newNodeID, peerDI
 		escapeNQL(peerDID),
 	)
 
-	result, _ := s.client.Query(ctx, nql, nil, s.collection)
-	if result == nil || len(result.Nodes) < 2 {
+	result, err := s.client.Query(ctx, nql, nil, s.collection)
+	if err != nil || result == nil || len(result.Nodes) < 2 {
 		return
 	}
 
 	// Second result is the previous negotiation
 	prevID := result.Nodes[1].ID
 	if prevID != "" && prevID != newNodeID {
-		s.client.InsertEdge(ctx, nietzsche.InsertEdgeOpts{
+		if _, err := s.client.InsertEdge(ctx, nietzsche.InsertEdgeOpts{
 			From:       prevID,
 			To:         newNodeID,
 			EdgeType:   "Association",
 			Weight:     1.0,
 			Collection: s.collection,
-		})
+		}); err != nil {
+			memoryLog.Warn("link to previous negotiation failed", logging.Err(err))
+		}
 	}
 }
 

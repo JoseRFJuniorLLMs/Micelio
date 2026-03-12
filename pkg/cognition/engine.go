@@ -2,9 +2,23 @@ package cognition
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
+
+	"github.com/JoseRFJuniorLLMs/Micelio/pkg/logging"
+)
+
+const (
+	// DefaultDesirePollInterval is how often the engine polls NietzscheDB for
+	// unfulfilled desires.
+	DefaultDesirePollInterval = 30 * time.Second
+
+	// DefaultMaintenanceInterval is how often the engine runs maintenance
+	// tasks such as purging expired capabilities.
+	DefaultMaintenanceInterval = 60 * time.Second
+
+	// DefaultDesireChannelSize is the buffer size for the desire channel.
+	DefaultDesireChannelSize = 64
 )
 
 // CognitionEngine is a background loop that polls NietzscheDB for desires,
@@ -13,6 +27,7 @@ import (
 type CognitionEngine struct {
 	store     *Store
 	desires   chan Desire
+	log       *logging.Logger
 	ctx       context.Context
 	cancel    context.CancelFunc
 	interval  time.Duration
@@ -27,10 +42,11 @@ func NewCognitionEngine(store *Store) *CognitionEngine {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &CognitionEngine{
 		store:    store,
-		desires:  make(chan Desire, 64),
+		desires:  make(chan Desire, DefaultDesireChannelSize),
+		log:      logging.New("cognition-engine"),
 		ctx:      ctx,
 		cancel:   cancel,
-		interval: 30 * time.Second,
+		interval: DefaultDesirePollInterval,
 		done:     make(chan struct{}),
 	}
 }
@@ -60,7 +76,7 @@ func (e *CognitionEngine) run() {
 	desireTicker := time.NewTicker(e.interval)
 	defer desireTicker.Stop()
 
-	maintenanceTicker := time.NewTicker(60 * time.Second)
+	maintenanceTicker := time.NewTicker(DefaultMaintenanceInterval)
 	defer maintenanceTicker.Stop()
 
 	for {
@@ -85,7 +101,7 @@ func (e *CognitionEngine) run() {
 func (e *CognitionEngine) pollDesires() {
 	desires, err := e.store.PollDesires(e.ctx)
 	if err != nil {
-		fmt.Printf("[cognition-engine] poll desires error: %v\n", err)
+		e.log.Error("poll desires failed", logging.Err(err))
 		return
 	}
 
@@ -99,7 +115,7 @@ func (e *CognitionEngine) pollDesires() {
 		select {
 		case e.desires <- d:
 		default:
-			fmt.Printf("[cognition-engine] desire channel full, dropping desire %s\n", d.ID)
+			e.log.Warn("desire channel full, dropping desire", logging.String("desire_id", d.ID))
 		}
 	}
 }
@@ -108,8 +124,8 @@ func (e *CognitionEngine) pollDesires() {
 func (e *CognitionEngine) maintenance() {
 	removed, err := e.store.PurgeExpiredCapabilities(e.ctx)
 	if err != nil {
-		fmt.Printf("[cognition-engine] purge capabilities error: %v\n", err)
+		e.log.Error("purge capabilities failed", logging.Err(err))
 	} else if removed > 0 {
-		fmt.Printf("[cognition-engine] purged %d expired capabilities\n", removed)
+		e.log.Info("purged expired capabilities", logging.Int("count", removed))
 	}
 }

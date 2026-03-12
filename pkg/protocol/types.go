@@ -44,5 +44,5 @@ const (
 // ProtocolID is the libp2p protocol identifier for AIP.
 const ProtocolID = "/aip/0.1.0"
 
-// AIP version string.
+// Version is the AIP protocol version string.
 const Version = "aip/0.1"
