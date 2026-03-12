@@ -49,6 +49,13 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("Run the two-agent demo:")
 	fmt.Println("  go run ./examples/two_agents/")
+	fmt.Println()
+	fmt.Println("Environment Variables:")
+	fmt.Println("  MICELIO_PORT              Agent listen port (default: 9000)")
+	fmt.Println("  MICELIO_IDENTITY          Path to identity JSON file")
+	fmt.Println("  MICELIO_NIETZSCHE_ADDR    NietzscheDB gRPC address (e.g., localhost:50051)")
+	fmt.Println("  MICELIO_REPUTATION_FILE   Path to reputation persistence file")
+	fmt.Println("  MICELIO_ENABLE_DHT        Enable DHT discovery (true/1)")
 }
 
 func cmdKeygen() {
@@ -93,10 +100,30 @@ func cmdAgent() {
 		}
 	}
 
+	// Environment variable fallbacks
+	if port == 9000 { // default value, check env
+		if envPort := os.Getenv("MICELIO_PORT"); envPort != "" {
+			if p, err := strconv.Atoi(envPort); err == nil {
+				port = p
+			}
+		}
+	}
+	if identityFile == "" {
+		identityFile = os.Getenv("MICELIO_IDENTITY")
+	}
+	nietzscheAddr := os.Getenv("MICELIO_NIETZSCHE_ADDR")
+	reputationFile := os.Getenv("MICELIO_REPUTATION_FILE")
+	enableDHT := os.Getenv("MICELIO_ENABLE_DHT") == "true" || os.Getenv("MICELIO_ENABLE_DHT") == "1"
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	cfg := agent.Config{Port: port}
+	cfg := agent.Config{
+		Port:           port,
+		NietzscheAddr:  nietzscheAddr,
+		ReputationFile: reputationFile,
+		EnableDHT:      enableDHT,
+	}
 
 	if identityFile != "" {
 		id, err := identity.Load(identityFile)

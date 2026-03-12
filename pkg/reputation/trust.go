@@ -177,8 +177,11 @@ func (ts *TrustStore) Records() map[string]*TrustRecord {
 func (ts *TrustStore) SetRecords(records map[string]*TrustRecord) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-
-	ts.peers = records
+	ts.peers = make(map[string]*TrustRecord, len(records))
+	for k, v := range records {
+		copied := *v
+		ts.peers[k] = &copied
+	}
 }
 
 // getOrCreate returns the trust record for a peer, creating one if it does not exist.

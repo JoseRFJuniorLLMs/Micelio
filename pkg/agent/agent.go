@@ -16,6 +16,7 @@ import (
 
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/cognition"
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/identity"
+	"github.com/JoseRFJuniorLLMs/Micelio/pkg/logging"
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/network"
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/protocol"
 	"github.com/JoseRFJuniorLLMs/Micelio/pkg/reputation"
@@ -41,6 +42,7 @@ type Agent struct {
 	Reputation    *reputation.TrustStore    // Standalone trust layer (always available)
 	Engine        *cognition.CognitionEngine // Background desire->INTENT loop (nil if no DB)
 
+	log            *logging.Logger
 	handlers       map[protocol.MessageType]MessageHandler
 	convStartTimes map[string]int64 // conversation_id -> start time (ms)
 	reputationFile string           // path to persist reputation JSON (empty = in-memory only)
@@ -61,10 +63,20 @@ type Config struct {
 	// ReputationFile is the path to persist reputation data as JSON.
 	// If empty, reputation is only kept in memory for the session.
 	ReputationFile string
+	// EnableDHT enables Kademlia DHT discovery alongside mDNS for global
+	// peer and capability discovery across the internet.
+	EnableDHT bool
+	// BootstrapPeers is a list of multiaddr strings for DHT bootstrap nodes.
+	// If empty and EnableDHT is true, the default libp2p bootstrap peers are used.
+	BootstrapPeers []string
+	// Capabilities is a list of capability names to advertise on DHT at startup.
+	Capabilities []string
 }
 
 // New creates and starts a new AIP agent.
 func New(ctx context.Context, cfg Config) (*Agent, error) {
+	log := logging.New("agent")
+
 	if cfg.Identity == nil {
 		id, err := identity.Generate()
 		if err != nil {
@@ -74,8 +86,10 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 	}
 
 	h, err := network.New(ctx, network.Config{
-		ListenPort: cfg.Port,
-		PrivKey:    cfg.Identity.PrivKey,
+		ListenPort:     cfg.Port,
+		PrivKey:        cfg.Identity.PrivKey,
+		EnableDHT:      cfg.EnableDHT,
+		BootstrapPeers: cfg.BootstrapPeers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create network host: %w", err)
@@ -101,6 +115,7 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		Capabilities:   make([]Capability, 0),
 		Conversations:  protocol.NewConversationStore(),
 		Reputation:     rep,
+		log:            log,
 		handlers:       make(map[protocol.MessageType]MessageHandler),
 		convStartTimes: make(map[string]int64),
 		reputationFile: cfg.ReputationFile,
@@ -115,18 +130,24 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 			Collection:    cfg.Collection,
 		})
 		if err != nil {
-			fmt.Printf("[%s] WARNING: cognition disabled: %v\n", cfg.Name, err)
+			a.log.Warn("cognition disabled", logging.String("name", cfg.Name), logging.Err(err))
 		} else {
 			a.Cognition = store
-			fmt.Printf("[%s] L6 cognition active (collection: %s)\n", cfg.Name, store.Collection())
+			a.log.Info("L6 cognition active", logging.String("name", cfg.Name), logging.String("collection", store.Collection()))
 
 			// Start cognition engine (desire -> INTENT loop)
 			engine := cognition.NewCognitionEngine(store)
 			engine.Start()
 			a.Engine = engine
-			fmt.Printf("[%s] cognition engine started\n", cfg.Name)
+			a.log.Info("cognition engine started", logging.String("name", cfg.Name))
+
+			// Consume desires from cognition engine
+			go a.consumeDesires()
 		}
 	}
+
+	// Start conversation timeout reaper
+	go a.reapConversations()
 
 	// Register the stream handler
 	h.SetStreamHandler(a.handleMessage)
@@ -137,14 +158,36 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("start discovery: %w", err)
 	}
 
+	// Start DHT discovery if enabled
+	if cfg.EnableDHT {
+		if err := h.StartDHTDiscovery(); err != nil {
+			a.log.Warn("DHT discovery failed to start", logging.String("did", cfg.Identity.DID[:12]), logging.Err(err))
+		} else {
+			// Advertise all capabilities on DHT
+			for _, cap := range cfg.Capabilities {
+				if err := h.AdvertiseCapability(ctx, cap); err != nil {
+					a.log.Warn("failed to advertise capability", logging.String("did", cfg.Identity.DID[:12]), logging.String("capability", cap), logging.Err(err))
+				}
+			}
+		}
+	}
+
 	return a, nil
 }
 
 // RegisterCapability adds a capability this agent can perform.
+// If DHT is enabled, the capability is also advertised on the DHT network.
 func (a *Agent) RegisterCapability(cap Capability) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.Capabilities = append(a.Capabilities, cap)
+	a.mu.Unlock()
+
+	// Also advertise on DHT if available
+	if a.Host != nil && a.Host.DHT != nil {
+		if err := a.Host.AdvertiseCapability(a.ctx, cap.Name); err != nil {
+			a.log.Warn("DHT advertise failed", logging.String("capability", cap.Name), logging.Err(err))
+		}
+	}
 }
 
 // OnMessage registers a handler for a specific message type.
@@ -222,6 +265,11 @@ func (a *Agent) SendPropose(ctx context.Context, target peer.ID, convID string, 
 	return a.sendReply(ctx, target, convID, protocol.TypePropose, propose)
 }
 
+// SendCounter sends a counter-proposal in an existing negotiation.
+func (a *Agent) SendCounter(ctx context.Context, target peer.ID, convID string, counter protocol.CounterPayload) error {
+	return a.sendReply(ctx, target, convID, protocol.TypeCounter, counter)
+}
+
 // SendAccept sends an ACCEPT in response to a PROPOSE.
 func (a *Agent) SendAccept(ctx context.Context, target peer.ID, convID string) error {
 	return a.sendReply(ctx, target, convID, protocol.TypeAccept, nil)
@@ -266,20 +314,29 @@ func (a *Agent) sendReply(ctx context.Context, target peer.ID, convID string, ms
 }
 
 func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
-	fmt.Printf("[%s] received %s from %s (conv: %s)\n",
-		a.Identity.DID[:20]+"...",
-		msg.Type,
-		from.String()[:12],
-		msg.ConversationID[:12]+"...",
+	a.log.Info("received message",
+		logging.String("type", string(msg.Type)),
+		logging.String("from", from.String()[:12]),
+		logging.String("conv", msg.ConversationID[:12]+"..."),
 	)
 
 	// Check trust before processing (L6 cognition + standalone reputation)
 	if a.Cognition != nil && a.Cognition.IsBanned(a.ctx, msg.From) {
-		fmt.Printf("[%s] BLOCKED: message from banned peer %s (cognition)\n", a.Identity.DID[:20]+"...", msg.From[:20])
+		a.log.Warn("blocked message from banned peer (cognition)", logging.String("peer", msg.From[:20]))
 		return
 	}
 	if a.Reputation.IsBlocked(msg.From) {
-		fmt.Printf("[%s] BLOCKED: message from banned peer %s (reputation)\n", a.Identity.DID[:20]+"...", msg.From[:20])
+		a.log.Warn("blocked message from banned peer (reputation)", logging.String("peer", msg.From[:20]))
+		return
+	}
+
+	// Validate message TTL
+	if msg.IsExpired() {
+		a.log.Warn("rejected expired message",
+			logging.String("from", msg.From[:12]),
+			logging.String("type", string(msg.Type)),
+			logging.Duration("age", time.Since(msg.Timestamp)),
+		)
 		return
 	}
 
@@ -287,33 +344,33 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 	if msg.Signature != "" {
 		sig, err := base64.StdEncoding.DecodeString(msg.Signature)
 		if err != nil {
-			fmt.Printf("[%s] invalid signature encoding from %s: %v\n", a.Identity.DID[:20]+"...", from.String()[:12], err)
+			a.log.Error("invalid signature encoding", logging.String("from", from.String()[:12]), logging.Err(err))
 			return
 		}
 		signable, err := msg.SignableBytes()
 		if err != nil {
-			fmt.Printf("[%s] failed to get signable bytes: %v\n", a.Identity.DID[:20]+"...", err)
+			a.log.Error("failed to get signable bytes", logging.Err(err))
 			return
 		}
 		ok, err := identity.VerifyFrom(msg.From, signable, sig)
 		if err != nil {
-			fmt.Printf("[%s] signature verification error from %s: %v\n", a.Identity.DID[:20]+"...", from.String()[:12], err)
+			a.log.Error("signature verification error", logging.String("from", from.String()[:12]), logging.Err(err))
 			return
 		}
 		if !ok {
-			fmt.Printf("[%s] REJECTED: invalid signature from %s\n", a.Identity.DID[:20]+"...", from.String()[:12])
+			a.log.Error("rejected invalid signature", logging.String("from", from.String()[:12]))
 			a.Reputation.RecordSignatureFailure(msg.From)
 			return
 		}
 	} else {
-		fmt.Printf("[%s] REJECTED: unsigned message from %s (type: %s)\n", a.Identity.DID[:20]+"...", from.String()[:12], msg.Type)
+		a.log.Error("rejected unsigned message", logging.String("from", from.String()[:12]), logging.String("type", string(msg.Type)))
 		a.Reputation.RecordSignatureFailure(msg.From)
 		return
 	}
 
 	// Check for duplicate messages (FIX 3)
 	if a.Conversations.HasSeen(msg.MsgID) {
-		fmt.Printf("[%s] dropping duplicate message %s\n", a.Identity.DID[:20]+"...", msg.MsgID)
+		a.log.Warn("dropping duplicate message", logging.String("msg_id", msg.MsgID))
 		return
 	}
 	a.Conversations.MarkSeen(msg.MsgID)
@@ -328,7 +385,10 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 		a.mu.Unlock()
 	}
 	if err := conv.Transition(msg); err != nil {
-		fmt.Printf("[%s] conversation %s transition error: %v\n", a.Identity.DID[:12], msg.ConversationID, err)
+		a.log.Error("conversation transition error",
+			logging.String("conv", msg.ConversationID),
+			logging.Err(err),
+		)
 		return
 	}
 
@@ -348,7 +408,7 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Printf("[agent] handler panic for %s: %v\n", msg.Type, r)
+					a.log.Error("handler panic", logging.String("type", string(msg.Type)), logging.String("panic", fmt.Sprintf("%v", r)))
 				}
 			}()
 			reply = handler(from, msg)
@@ -459,6 +519,73 @@ func (a *Agent) PeerID() peer.ID {
 	return a.Host.ID()
 }
 
+// consumeDesires reads desires from the cognition engine channel and converts
+// them into INTENT messages sent to peers that advertise the required capability.
+func (a *Agent) consumeDesires() {
+	for desire := range a.Engine.Desires() {
+		if a.Cognition == nil {
+			continue
+		}
+
+		// Find peers that can fulfill this desire
+		peers, err := a.Cognition.FindPeersWithCapability(a.ctx, desire.Capability, 0.3, 5)
+		if err != nil || len(peers) == 0 {
+			a.log.Warn("desire: no peers found",
+				logging.String("desire_id", desire.ID),
+				logging.String("capability", desire.Capability),
+			)
+			continue
+		}
+
+		// Use the best peer (list is pre-sorted by trust)
+		bestPeer := peers[0]
+		targetID, err := peer.Decode(bestPeer.PeerDID)
+		if err != nil {
+			a.log.Error("desire: failed to decode peer DID",
+				logging.String("desire_id", desire.ID),
+				logging.String("peer_did", bestPeer.PeerDID),
+				logging.Err(err),
+			)
+			continue
+		}
+
+		intent := protocol.IntentPayload{
+			Capability:  desire.Capability,
+			Description: desire.Description,
+		}
+		_, err = a.SendIntent(a.ctx, targetID, intent)
+		if err != nil {
+			a.log.Error("desire: failed to send intent",
+				logging.String("desire_id", desire.ID),
+				logging.Err(err),
+			)
+			continue
+		}
+		a.log.Info("desire: sent intent",
+			logging.String("desire_id", desire.ID),
+			logging.String("peer", bestPeer.PeerDID),
+			logging.String("capability", desire.Capability),
+		)
+	}
+}
+
+// reapConversations periodically checks for and marks timed-out conversations.
+func (a *Agent) reapConversations() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-ticker.C:
+			timedOut := a.Conversations.TimeoutConversations()
+			if len(timedOut) > 0 {
+				a.log.Info("timed out stale conversations", logging.Int("count", len(timedOut)))
+			}
+		}
+	}
+}
+
 // Close shuts down the agent, saves reputation data, and stops the cognition engine.
 func (a *Agent) Close() error {
 	// Stop the cognition engine if running
@@ -475,7 +602,7 @@ func (a *Agent) Close() error {
 	// in the agent's config. Since Config is not stored, we use a helper field.
 	if a.reputationFile != "" && a.Reputation != nil {
 		if err := a.Reputation.Save(a.reputationFile); err != nil {
-			fmt.Printf("[agent] warning: failed to save reputation: %v\n", err)
+			a.log.Warn("failed to save reputation", logging.Err(err))
 		}
 	}
 
