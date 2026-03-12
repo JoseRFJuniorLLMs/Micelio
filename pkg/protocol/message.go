@@ -118,9 +118,67 @@ func DecodeMessage(data []byte) (*Message, error) {
 	return &msg, nil
 }
 
+// maxClockSkew is the maximum allowed clock difference for TTL checks.
+const maxClockSkew = 30 * time.Second
+
+// ValidateTTL checks whether the message has expired based on its TTL and timestamp.
+// It allows up to maxClockSkew for messages slightly in the future.
+func (m *Message) ValidateTTL() error {
+	age := time.Since(m.Timestamp)
+	if age < -maxClockSkew {
+		return fmt.Errorf("message timestamp is too far in the future (%v ahead)", -age)
+	}
+	if m.TTL > 0 && age > time.Duration(m.TTL)*time.Second {
+		return fmt.Errorf("message expired: age %v exceeds TTL %ds", age, m.TTL)
+	}
+	return nil
+}
+
+// IsExpired returns true if the message TTL has been exceeded.
+func (m *Message) IsExpired() bool {
+	if m.TTL <= 0 {
+		return false
+	}
+	return time.Since(m.Timestamp) > time.Duration(m.TTL)*time.Second
+}
+
 // SignableBytes returns the canonical bytes to sign (message without signature field).
 func (m *Message) SignableBytes() ([]byte, error) {
 	cp := *m
 	cp.Signature = ""
 	return json.Marshal(cp)
+}
+
+// CounterPayload for COUNTER messages (modified proposal).
+type CounterPayload struct {
+	Capability string         `json:"capability"`
+	Approach   string         `json:"approach"`
+	Cost       *Budget        `json:"cost,omitempty"`
+	ETA        *time.Duration `json:"eta,omitempty"`
+	Conditions []string       `json:"conditions,omitempty"`
+	Reason     string         `json:"reason"` // why the original was countered
+}
+
+// RejectPayload for REJECT messages.
+type RejectPayload struct {
+	Reason string `json:"reason"`
+	Code   string `json:"code,omitempty"` // e.g. "budget_exceeded", "capability_mismatch"
+}
+
+// CancelPayload for CANCEL messages.
+type CancelPayload struct {
+	Reason string `json:"reason"`
+}
+
+// ErrorPayload for ERROR messages.
+type ErrorPayload struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+// PingPayload for PING/PONG messages.
+type PingPayload struct {
+	Nonce     string    `json:"nonce"`
+	Timestamp time.Time `json:"timestamp"`
 }

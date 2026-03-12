@@ -3,14 +3,19 @@
 package identity
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // Identity represents an agent's cryptographic identity (DID:key from Ed25519).
@@ -142,6 +147,110 @@ func Load(path string) (*Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode seed: %w", err)
 	}
+	return FromPrivateKey(seed)
+}
+
+// encryptedIdentity is the JSON format for encrypted identity files.
+type encryptedIdentity struct {
+	EncryptedSeed string `json:"encrypted_seed"` // base64, AES-256-GCM ciphertext
+	Salt          string `json:"salt"`            // base64, PBKDF2 salt
+	Nonce         string `json:"nonce"`           // base64, GCM nonce
+	DID           string `json:"did"`
+}
+
+// pbkdf2Iterations is the number of PBKDF2-SHA256 iterations for key derivation.
+const pbkdf2Iterations = 100000
+
+// deriveKey derives a 32-byte AES key from a passphrase and salt using PBKDF2-SHA256.
+func deriveKey(passphrase string, salt []byte) []byte {
+	return pbkdf2.Key([]byte(passphrase), salt, pbkdf2Iterations, 32, sha256.New)
+}
+
+// SaveEncrypted persists the identity to an AES-256-GCM encrypted JSON file.
+func (id *Identity) SaveEncrypted(path string, passphrase string) error {
+	raw, err := id.PrivKey.Raw()
+	if err != nil {
+		return fmt.Errorf("extract raw private key: %w", err)
+	}
+	seed := raw[:ed25519.SeedSize]
+
+	// Generate random salt and derive key
+	salt := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return fmt.Errorf("generate salt: %w", err)
+	}
+	key := deriveKey(passphrase, salt)
+
+	// Encrypt with AES-256-GCM
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("generate nonce: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, seed, nil)
+
+	enc := encryptedIdentity{
+		EncryptedSeed: base64.StdEncoding.EncodeToString(ciphertext),
+		Salt:          base64.StdEncoding.EncodeToString(salt),
+		Nonce:         base64.StdEncoding.EncodeToString(nonce),
+		DID:           id.DID,
+	}
+	data, err := json.MarshalIndent(enc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
+// LoadEncrypted reads an AES-256-GCM encrypted identity from a JSON file.
+func LoadEncrypted(path string, passphrase string) (*Identity, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var enc encryptedIdentity
+	if err := json.Unmarshal(data, &enc); err != nil {
+		return nil, fmt.Errorf("unmarshal encrypted identity: %w", err)
+	}
+
+	salt, err := base64.StdEncoding.DecodeString(enc.Salt)
+	if err != nil {
+		return nil, fmt.Errorf("decode salt: %w", err)
+	}
+	nonce, err := base64.StdEncoding.DecodeString(enc.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode nonce: %w", err)
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(enc.EncryptedSeed)
+	if err != nil {
+		return nil, fmt.Errorf("decode ciphertext: %w", err)
+	}
+
+	// Derive key and decrypt
+	key := deriveKey(passphrase, salt)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("create GCM: %w", err)
+	}
+
+	seed, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt seed (wrong passphrase?): %w", err)
+	}
+
 	return FromPrivateKey(seed)
 }
 

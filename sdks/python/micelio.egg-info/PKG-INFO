@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: micelio
+Version: 0.1.0
+Summary: Python SDK for the Agent Internet Protocol (AIP)
+License: MIT
+Requires-Python: >=3.9
+Requires-Dist: cryptography>=41.0
+Requires-Dist: python-ulid>=2.0
+Provides-Extra: discovery
+Requires-Dist: zeroconf>=0.80; extra == "discovery"
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Dynamic: requires-python

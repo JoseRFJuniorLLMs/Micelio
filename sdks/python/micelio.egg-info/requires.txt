@@ -1,0 +1,8 @@
+cryptography>=41.0
+python-ulid>=2.0
+
+[dev]
+pytest>=7.0
+
+[discovery]
+zeroconf>=0.80
