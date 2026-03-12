@@ -93,7 +93,7 @@ func (s *Store) GetNegotiationHistory(ctx context.Context, peerDID string, limit
 
 	nql := fmt.Sprintf(
 		`MATCH (n:Episodic) WHERE n.node_label = "negotiation" AND n.peer_did = "%s" ORDER BY n.energy DESC LIMIT %d RETURN n`,
-		peerDID, limit,
+		escapeNQL(peerDID), limit,
 	)
 
 	result, err := s.client.Query(ctx, nql, nil, s.collection)
@@ -143,7 +143,7 @@ func (s *Store) GetRecentNegotiations(ctx context.Context, limit int) ([]Negotia
 func (s *Store) linkToPreviousNegotiation(ctx context.Context, newNodeID, peerDID string) {
 	nql := fmt.Sprintf(
 		`MATCH (n:Episodic) WHERE n.node_label = "negotiation" AND n.peer_did = "%s" ORDER BY n.energy DESC LIMIT 2 RETURN n`,
-		peerDID,
+		escapeNQL(peerDID),
 	)
 
 	result, _ := s.client.Query(ctx, nql, nil, s.collection)

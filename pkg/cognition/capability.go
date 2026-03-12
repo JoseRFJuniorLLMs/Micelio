@@ -70,7 +70,7 @@ func (s *Store) FindPeersWithCapability(ctx context.Context, capName string, min
 
 	nql := fmt.Sprintf(
 		`MATCH (n:Semantic) WHERE n.node_label = "capability_cache" AND n.capability_name = "%s" LIMIT %d RETURN n`,
-		capName, limit*2, // over-fetch to filter by trust
+		escapeNQL(capName), limit*2, // over-fetch to filter by trust
 	)
 
 	result, err := s.client.Query(ctx, nql, nil, s.collection)

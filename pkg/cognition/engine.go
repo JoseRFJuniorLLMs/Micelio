@@ -3,6 +3,7 @@ package cognition
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -10,11 +11,13 @@ import (
 // purges expired capabilities, and cleans up stale message IDs.
 // It bridges the desire layer with the agent's INTENT generation.
 type CognitionEngine struct {
-	store    *Store
-	desires  chan Desire
-	ctx      context.Context
-	cancel   context.CancelFunc
-	interval time.Duration
+	store     *Store
+	desires   chan Desire
+	ctx       context.Context
+	cancel    context.CancelFunc
+	interval  time.Duration
+	startOnce sync.Once
+	done      chan struct{}
 }
 
 // NewCognitionEngine creates a new CognitionEngine tied to the given Store.
@@ -28,18 +31,22 @@ func NewCognitionEngine(store *Store) *CognitionEngine {
 		ctx:      ctx,
 		cancel:   cancel,
 		interval: 30 * time.Second,
+		done:     make(chan struct{}),
 	}
 }
 
 // Start launches the background goroutine that polls desires and performs
 // periodic maintenance. It is safe to call Start only once.
 func (e *CognitionEngine) Start() {
-	go e.run()
+	e.startOnce.Do(func() {
+		go e.run()
+	})
 }
 
 // Stop signals the background goroutine to exit and waits for cleanup.
 func (e *CognitionEngine) Stop() {
 	e.cancel()
+	<-e.done
 }
 
 // Desires returns a read-only channel that emits unfulfilled desires.
@@ -60,6 +67,7 @@ func (e *CognitionEngine) run() {
 		select {
 		case <-e.ctx.Done():
 			close(e.desires)
+			close(e.done)
 			return
 
 		case <-desireTicker.C:

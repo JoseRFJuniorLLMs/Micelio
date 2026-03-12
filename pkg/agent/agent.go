@@ -306,7 +306,9 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 			return
 		}
 	} else {
-		fmt.Printf("[%s] WARNING: unsigned message from %s (type: %s)\n", a.Identity.DID[:20]+"...", from.String()[:12], msg.Type)
+		fmt.Printf("[%s] REJECTED: unsigned message from %s (type: %s)\n", a.Identity.DID[:20]+"...", from.String()[:12], msg.Type)
+		a.Reputation.RecordSignatureFailure(msg.From)
+		return
 	}
 
 	// Check for duplicate messages (FIX 3)
@@ -325,7 +327,10 @@ func (a *Agent) handleMessage(from peer.ID, msg *protocol.Message) {
 		a.convStartTimes[msg.ConversationID] = time.Now().UnixMilli()
 		a.mu.Unlock()
 	}
-	conv.Transition(msg)
+	if err := conv.Transition(msg); err != nil {
+		fmt.Printf("[%s] conversation %s transition error: %v\n", a.Identity.DID[:12], msg.ConversationID, err)
+		return
+	}
 
 	// Cache peer capability from PROPOSE messages (L6)
 	if msg.Type == protocol.TypePropose && a.Cognition != nil {

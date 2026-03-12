@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -36,6 +37,7 @@ type DHTDiscovery struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
+	wg               sync.WaitGroup
 	mu               sync.RWMutex
 	advertisedCaps   map[string]context.CancelFunc // capability name -> cancel for re-advertise loop
 	bootstrapPeers   []peer.AddrInfo
@@ -80,8 +82,7 @@ func NewDHTDiscovery(ctx context.Context, h host.Host, bootstrapPeers []peer.Add
 func (d *DHTDiscovery) Bootstrap() error {
 	// Connect to bootstrap peers in parallel
 	var wg sync.WaitGroup
-	connected := 0
-	var mu sync.Mutex
+	var connected int64
 
 	for _, pi := range d.bootstrapPeers {
 		if pi.ID == d.host.ID() {
@@ -97,15 +98,18 @@ func (d *DHTDiscovery) Bootstrap() error {
 				fmt.Printf("[dht] bootstrap connect to %s failed: %v\n", pi.ID.String()[:12], err)
 				return
 			}
-			mu.Lock()
-			connected++
-			mu.Unlock()
+			atomic.AddInt64(&connected, 1)
 			fmt.Printf("[dht] connected to bootstrap peer: %s\n", pi.ID.String()[:12])
 		}(pi)
 	}
 	wg.Wait()
 
-	fmt.Printf("[dht] connected to %d/%d bootstrap peers\n", connected, len(d.bootstrapPeers))
+	finalConnected := atomic.LoadInt64(&connected)
+	fmt.Printf("[dht] connected to %d/%d bootstrap peers\n", finalConnected, len(d.bootstrapPeers))
+
+	if finalConnected == 0 {
+		return fmt.Errorf("dht: bootstrap failed, could not connect to any peer")
+	}
 
 	// Bootstrap the DHT routing table
 	if err := d.dht.Bootstrap(d.ctx); err != nil {
@@ -148,7 +152,9 @@ func (d *DHTDiscovery) AdvertiseCapability(ctx context.Context, capabilityName s
 	fmt.Printf("[dht] advertising capability %q (re-advertise every %v)\n", capabilityName, ttl)
 
 	// Background re-advertise loop
+	d.wg.Add(1)
 	go func() {
+		defer d.wg.Done()
 		ticker := time.NewTicker(ttl)
 		defer ticker.Stop()
 		for {
@@ -245,6 +251,7 @@ func (d *DHTDiscovery) Close() error {
 	d.mu.Unlock()
 
 	d.cancel()
+	d.wg.Wait()
 	return d.dht.Close()
 }
 

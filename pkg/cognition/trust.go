@@ -202,6 +202,9 @@ func (s *Store) GetTrustedPeers(ctx context.Context, minTrust float32, limit int
 
 // IsBanned returns true if a peer has been banned (signature failure or manual block).
 func (s *Store) IsBanned(ctx context.Context, peerDID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	record, err := s.getTrustRecord(ctx, peerDID)
 	if err != nil {
 		return false
@@ -214,7 +217,7 @@ func (s *Store) IsBanned(ctx context.Context, peerDID string) bool {
 func (s *Store) getTrustRecord(ctx context.Context, peerDID string) (*TrustRecord, error) {
 	nql := fmt.Sprintf(
 		`MATCH (n:Semantic) WHERE n.node_label = "trust_record" AND n.peer_did = "%s" RETURN n LIMIT 1`,
-		peerDID,
+		escapeNQL(peerDID),
 	)
 
 	result, err := s.client.Query(ctx, nql, nil, s.collection)

@@ -36,8 +36,12 @@ type GossipBroadcaster struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 
+	wg       sync.WaitGroup
 	mu       sync.RWMutex
 	handlers []CapabilityHandler
+
+	closeMu sync.Mutex
+	closed  bool
 }
 
 // NewGossipBroadcaster creates a new GossipBroadcaster that publishes and
@@ -78,7 +82,14 @@ func (g *GossipBroadcaster) BroadcastCapability(ctx context.Context, capAd proto
 		return fmt.Errorf("marshal capability ad: %w", err)
 	}
 
-	if err := g.topic.Publish(ctx, data); err != nil {
+	g.closeMu.Lock()
+	if g.closed {
+		g.closeMu.Unlock()
+		return fmt.Errorf("broadcaster closed")
+	}
+	err = g.topic.Publish(ctx, data)
+	g.closeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("publish capability ad: %w", err)
 	}
 
@@ -100,7 +111,9 @@ func (g *GossipBroadcaster) OnCapability(handler CapabilityHandler) {
 // registered handlers. This should be called once after registering
 // handlers with OnCapability.
 func (g *GossipBroadcaster) SubscribeCapabilities(ctx context.Context) {
+	g.wg.Add(1)
 	go func() {
+		defer g.wg.Done()
 		for {
 			msg, err := g.sub.Next(ctx)
 			if err != nil {
@@ -139,6 +152,10 @@ func (g *GossipBroadcaster) SubscribeCapabilities(ctx context.Context) {
 
 // Close shuts down the gossip broadcaster, unsubscribing from the topic.
 func (g *GossipBroadcaster) Close() {
+	g.closeMu.Lock()
+	g.closed = true
+	g.closeMu.Unlock()
 	g.cancel()
 	g.sub.Cancel()
+	g.wg.Wait()
 }
